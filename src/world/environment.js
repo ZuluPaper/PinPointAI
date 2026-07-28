@@ -19,11 +19,19 @@ export class Environment {
 
     // ---- lighting: warm late-afternoon savanna ----
     // Hemisphere: cool skylight from above, warm bounced laterite from below.
-    this.hemi = new THREE.HemisphereLight(0xbcd2e2, 0x5c4a2e, 0.5);
+    // Lifted sky term so shadow-side surfaces keep detail instead of crushing
+    // to black silhouettes when the camera faces into the low sun.
+    this.hemi = new THREE.HemisphereLight(0xcfe1ef, 0x6b5636, 0.75);
     scene.add(this.hemi);
 
-    // Low, warm, strong key light for long golden-hour shadows.
-    this.sun = new THREE.DirectionalLight(0xffdba0, 2.7);
+    // Weak warm ambient floor: guarantees back/shadow faces never clip to pure
+    // black, restoring the missing midtones the art director flagged.
+    this.ambient = new THREE.AmbientLight(0x4a4026, 0.32);
+    scene.add(this.ambient);
+
+    // Low, warm, strong key light for long golden-hour shadows. Intensity
+    // pulled back from 2.7 so backlit subjects don't read as pure-black cutouts.
+    this.sun = new THREE.DirectionalLight(0xffdba0, 1.9);
     this.sun.position.set(72, 58, 46);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
@@ -47,16 +55,20 @@ export class Environment {
     this.sky = new Sky();
     this.sky.scale.setScalar(5000);
     const u = this.sky.material.uniforms;
-    u.turbidity.value = 8.5;        // dusty air
-    u.rayleigh.value = 2.2;         // warmer, deeper sky gradient
-    u.mieCoefficient.value = 0.009; // strong sun halo through haze
-    u.mieDirectionalG.value = 0.82;
+    // Toned down so the upper sky holds a graded blue→warm value instead of
+    // blowing to a flat white sheet: less haze, a softer (non-clipping) halo,
+    // and a deeper zenith from the reduced rayleigh scatter.
+    u.turbidity.value = 5.5;        // clearer air → horizon stays below clip
+    u.rayleigh.value = 1.7;         // darker blue at zenith, warm at horizon
+    u.mieCoefficient.value = 0.004; // gentler sun halo, no white bloom
+    u.mieDirectionalG.value = 0.78;
     // Sun ~14 deg above horizon → long shadows, warm rim.
     const elevation = 14, azimuth = 108;
     const phi = THREE.MathUtils.degToRad(90 - elevation);
     const theta = THREE.MathUtils.degToRad(azimuth);
     const sunDir = new THREE.Vector3().setFromSphericalCoords(1, phi, theta);
     u.sunPosition.value.copy(sunDir);
+    this._sunDir = sunDir.clone(); // shared with grass backlight shader
     scene.add(this.sky);
 
     // Align the actual light with the sky's sun for coherent shadows/rim.
@@ -67,8 +79,10 @@ export class Environment {
     // Distance term (exp2) for depth; a warm horizon tint sells the golden haze.
     // A cheap height component is injected into the terrain/grass shaders below
     // so low-lying dust reads thicker than the clear upper air.
-    this._fogColor = new THREE.Color(0xd8bd93);
-    scene.fog = new THREE.FogExp2(this._fogColor.getHex(), 0.0052);
+    // Thinner, slightly darker & desaturated haze so the horizon holds a value
+    // below clipping rather than merging sky and land into one white band.
+    this._fogColor = new THREE.Color(0xc4b088);
+    scene.fog = new THREE.FogExp2(this._fogColor.getHex(), 0.0032);
 
     this._buildTerrain();
     this._buildGrass();
@@ -152,6 +166,15 @@ export class Environment {
     });
     albedo.colorSpace = THREE.SRGBColorSpace;
 
+    // Fine second-scale detail: a high-frequency albedo/normal pair blended
+    // over the large tiles so the near ground reads as gritty dirt (grain,
+    // pebbles, micro-relief) instead of a smeared red-brown gradient.
+    const { detailAlbedo, detailNormal } = this._makeDetailTextures();
+    [detailAlbedo, detailNormal].forEach((t) => {
+      t.wrapS = t.wrapT = THREE.RepeatWrapping;
+      t.anisotropy = 8;
+    });
+
     const mat = new THREE.MeshStandardMaterial({
       map: albedo,
       normalMap: normal,
@@ -164,6 +187,7 @@ export class Environment {
       dithering: true,
     });
     this._injectHeightFog(mat);
+    this._injectTerrainDetail(mat, detailAlbedo, detailNormal);
 
     const ground = new THREE.Mesh(geo, mat);
     ground.receiveShadow = true;
@@ -198,6 +222,82 @@ export class Environment {
           vWorldPosH = (modelMatrix * wpH).xyz;`)
         .replace('#include <common>',
           '#include <common>\n varying vec3 vWorldPosH;');
+    };
+  }
+
+  // Blend a small-scale detail albedo + normal on top of the large tiles.
+  // Detail textures average to neutral (grey albedo / flat normal), so distant
+  // mips fade to a no-op and only near ground (<~40m) shows the extra grain —
+  // no shimmer, but crisp dirt within a few metres of the camera.
+  _injectTerrainDetail(mat, detailAlbedo, detailNormal) {
+    const prev = mat.onBeforeCompile; // compose on top of the height-fog inject
+    mat.onBeforeCompile = (shader) => {
+      if (prev) prev(shader);
+      shader.uniforms.uDetailAlbedo = { value: detailAlbedo };
+      shader.uniforms.uDetailNormal = { value: detailNormal };
+      shader.uniforms.uDetailRepeat = { value: 8.0 }; // × base tiling (42)
+      shader.uniforms.uDetailAlbedoAmt = { value: 0.55 };
+      shader.uniforms.uDetailNormalAmt = { value: 1.15 };
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>
+          uniform sampler2D uDetailAlbedo;
+          uniform sampler2D uDetailNormal;
+          uniform float uDetailRepeat;
+          uniform float uDetailAlbedoAmt;
+          uniform float uDetailNormalAmt;`)
+        .replace('#include <map_fragment>', `#include <map_fragment>
+          #ifdef USE_MAP
+            vec3 dAlb = texture2D(uDetailAlbedo, vMapUv * uDetailRepeat).rgb;
+            // centred on 0.5 → *2 centres on 1.0; far mips average to no change.
+            diffuseColor.rgb *= mix(vec3(1.0), dAlb * 2.0, uDetailAlbedoAmt);
+          #endif`)
+        .replace('mapN.xy *= normalScale;', `mapN.xy *= normalScale;
+          vec3 dN = texture2D(uDetailNormal, vNormalMapUv * uDetailRepeat).xyz * 2.0 - 1.0;
+          mapN.xy += dN.xy * uDetailNormalAmt;`);
+    };
+  }
+
+  // High-frequency grey albedo + flat-ish normal for close-range dirt grain.
+  _makeDetailTextures() {
+    const S = 256;
+    const alb = document.createElement('canvas'); alb.width = alb.height = S;
+    const nrm = document.createElement('canvas'); nrm.width = nrm.height = S;
+    const ac = alb.getContext('2d');
+    const nc = nrm.getContext('2d');
+    ac.fillStyle = '#808080'; ac.fillRect(0, 0, S, S); // neutral → no tint bias
+    nc.fillStyle = '#8080ff'; nc.fillRect(0, 0, S, S); // flat normal
+
+    const rand = (() => { let s = 5381; return () => (s = (s * 16807) % 2147483647) / 2147483647; })();
+
+    // Dense fine grain: light/dark speckles give per-cm value breakup.
+    for (let i = 0; i < 22000; i++) {
+      const x = rand() * S, y = rand() * S;
+      const v = (rand() - 0.5) * 150;
+      const g = 128 + v | 0;
+      ac.fillStyle = `rgba(${g},${g},${g},0.5)`;
+      ac.fillRect(x, y, 1, 1);
+      // matching micro-bump in the normal (random tangent tilt)
+      const dx = (rand() - 0.5), dy = (rand() - 0.5);
+      nc.fillStyle = `rgba(${128 + dx * 110 | 0},${128 + dy * 110 | 0},255,0.35)`;
+      nc.beginPath(); nc.arc(x, y, 0.8, 0, Math.PI * 2); nc.fill();
+    }
+
+    // Scattered pebbles: small round highlights with a raised normal lip.
+    for (let i = 0; i < 900; i++) {
+      const x = rand() * S, y = rand() * S, r = 1.5 + rand() * 4;
+      const t = rand();
+      ac.fillStyle = t > 0.5
+        ? `rgba(190,180,160,${0.18 + rand() * 0.18})`  // pale grit
+        : `rgba(60,44,30,${0.18 + rand() * 0.2})`;      // dark pebble/crack fleck
+      ac.beginPath(); ac.arc(x, y, r, 0, Math.PI * 2); ac.fill();
+      const ndir = rand() * Math.PI * 2;
+      nc.fillStyle = `rgba(${128 + Math.cos(ndir) * 80 | 0},${128 + Math.sin(ndir) * 80 | 0},240,0.4)`;
+      nc.beginPath(); nc.arc(x, y, r, 0, Math.PI * 2); nc.fill();
+    }
+
+    return {
+      detailAlbedo: new THREE.CanvasTexture(alb),
+      detailNormal: new THREE.CanvasTexture(nrm),
     };
   }
 
@@ -293,7 +393,7 @@ export class Environment {
 
   // -------------------------------------------------------------- grass
   _buildGrass() {
-    const COUNT = 5200;            // perf-safe, single draw call
+    const COUNT = 7200;            // perf-safe, single draw call
     const AREA = 150;              // spread around the play corridor
     const tex = this._makeGrassTexture();
 
@@ -302,6 +402,11 @@ export class Environment {
     blade.translate(0, 0.55, 0); // pivot at base for wind bending
     const cross = blade.clone(); cross.rotateY(Math.PI / 2);
     const geo = this._mergeGeoms([blade, cross]);
+    // Point every blade normal up so tops catch skylight (hemisphere) like a
+    // real tuft rather than lighting as two flat vertical cards.
+    const gn = geo.attributes.normal;
+    for (let i = 0; i < gn.count; i++) gn.setXYZ(i, 0, 1, 0);
+    gn.needsUpdate = true;
 
     const mat = new THREE.MeshStandardMaterial({
       map: tex,
@@ -321,6 +426,7 @@ export class Environment {
     mesh.frustumCulled = true;
 
     const dummy = new THREE.Object3D();
+    const col = new THREE.Color();
     const rand = (() => { let s = 4451; return () => (s = (s * 16807) % 2147483647) / 2147483647; })();
     let placed = 0;
     for (let i = 0; i < COUNT; i++) {
@@ -330,15 +436,30 @@ export class Environment {
       const y = this.getHeight(x, z);
       const patch = this._noise(x * 0.05 + 11, z * 0.05 - 7);
       if (patch < 0.42 && rand() > 0.25) continue; // clump into grassy patches
-      const scale = 0.7 + rand() * 1.5;
+      // Wider scale spread → density/height variance breaks the uniform mat.
+      const scale = 0.55 + rand() * rand() * 2.1;
       dummy.position.set(x, y, z);
       dummy.rotation.set(0, rand() * Math.PI, 0);
       dummy.scale.set(scale * (0.8 + rand() * 0.4), scale, scale);
       dummy.updateMatrix();
-      mesh.setMatrixAt(placed++, dummy.matrix);
+      mesh.setMatrixAt(placed, dummy.matrix);
+
+      // Per-clump tint (multiplies the texture): greener in moist patches,
+      // drier gold on rises, plus per-tuft jitter to kill the flat ochre sheet.
+      const greenness = THREE.MathUtils.smoothstep(patch, 0.4, 0.9);
+      const drier = THREE.MathUtils.clamp((y + 2) / 6, 0, 1);
+      const j = 0.9 + rand() * 0.2;
+      col.setRGB(
+        (1.0 - greenness * 0.22 + drier * 0.04) * j,
+        (1.0 - greenness * 0.02) * j,
+        (0.78 - drier * 0.22 + greenness * 0.06) * j,
+      );
+      mesh.setColorAt(placed, col);
+      placed++;
     }
     mesh.count = placed; // only render the tufts we actually placed
     mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     // Generous bounds so culling never pops the whole field near the camera.
     mesh.geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(), AREA * 1.6);
 
@@ -381,14 +502,35 @@ export class Environment {
     mat.userData.uWind = uWind;
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uWind = uWind;
+      // Subsurface/backlight: when the camera looks toward the low sun through a
+      // blade, tips glow warm instead of reading as opaque cards. World view
+      // vector reuses vWorldPosH from the height-fog inject (always run for grass).
+      shader.uniforms.uGrassSunDir = { value: this._sunDir || new THREE.Vector3(0, 1, 0) };
+      shader.uniforms.uGrassSunColor = { value: new THREE.Color(0xffd9a0) };
+      shader.uniforms.uGrassBacklight = { value: 0.7 };
       shader.vertexShader = shader.vertexShader
-        .replace('#include <common>', '#include <common>\n uniform float uWind;')
+        .replace('#include <common>', '#include <common>\n uniform float uWind;\n varying float vGrassTip;')
         .replace('#include <begin_vertex>', `#include <begin_vertex>
+          vGrassTip = uv.y;
           // sway grows toward the tip (uv.y); phase varies per instance origin
           float ph = instanceMatrix[3].x * 0.6 + instanceMatrix[3].z * 0.6;
           float sway = sin(uWind * 1.6 + ph) * 0.14 + sin(uWind * 3.1 + ph * 1.7) * 0.05;
           transformed.x += sway * uv.y * uv.y;
           transformed.z += sway * 0.6 * uv.y * uv.y;`);
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>
+          uniform vec3 uGrassSunDir;
+          uniform vec3 uGrassSunColor;
+          uniform float uGrassBacklight;
+          varying float vGrassTip;`)
+        .replace('#include <tonemapping_fragment>', `
+          {
+            vec3 toObj = normalize(vWorldPosH - cameraPosition);
+            float back = pow(clamp(dot(toObj, uGrassSunDir), 0.0, 1.0), 3.0);
+            float tip = vGrassTip * vGrassTip;
+            gl_FragColor.rgb += uGrassSunColor * (back * tip * uGrassBacklight);
+          }
+          #include <tonemapping_fragment>`);
       // keep the height-fog varying available if _injectHeightFog also ran
       mat.userData._windShader = shader;
     };
@@ -400,14 +542,14 @@ export class Environment {
     const g = c.getContext('2d');
     g.clearRect(0, 0, W, H);
     const rand = (() => { let s = 7717; return () => (s = (s * 16807) % 2147483647) / 2147483647; })();
-    // A cluster of dry blades, tapering, ochre → pale gold, some greenish.
-    const blades = 26;
+    // A dense cluster of dry blades, tapering, ochre → pale gold, some greenish.
+    const blades = 40;
     for (let i = 0; i < blades; i++) {
-      const bx = W * (0.15 + rand() * 0.7);
-      const bw = 2 + rand() * 3;
+      const bx = W * (0.1 + rand() * 0.8);
+      const bw = 1.6 + rand() * 3;
       const bh = H * (0.45 + rand() * 0.5);
       const lean = (rand() - 0.5) * 26;
-      const green = rand() < 0.3;
+      const green = rand() < 0.32;
       const r = green ? 120 + rand() * 40 : 190 + rand() * 50;
       const gg = green ? 130 + rand() * 40 : 165 + rand() * 45;
       const b = 60 + rand() * 40;
@@ -418,6 +560,22 @@ export class Environment {
       g.quadraticCurveTo(bx + lean * 0.5, H - bh * 0.5, bx + lean, H - bh);
       g.stroke();
     }
+
+    // Root-to-tip luminance gradient baked into the blades only (source-atop
+    // preserves the cut-out alpha). Canvas top (y=0) is the tip (uv.y≈1),
+    // bottom (y=H) the root — so tips stay bright dry-gold, roots go shadowed.
+    g.globalCompositeOperation = 'source-atop';
+    const dark = g.createLinearGradient(0, 0, 0, H);
+    dark.addColorStop(0.0, 'rgba(28,20,8,0.0)');    // tip: undarkened
+    dark.addColorStop(0.55, 'rgba(24,17,7,0.14)');
+    dark.addColorStop(1.0, 'rgba(18,12,5,0.6)');    // root: in shadow
+    g.fillStyle = dark; g.fillRect(0, 0, W, H);
+    const warm = g.createLinearGradient(0, 0, 0, H);
+    warm.addColorStop(0.0, 'rgba(244,208,120,0.3)'); // sun-caught gold tips
+    warm.addColorStop(0.45, 'rgba(214,176,86,0.0)');
+    g.fillStyle = warm; g.fillRect(0, 0, W, H);
+    g.globalCompositeOperation = 'source-over';
+
     const t = new THREE.CanvasTexture(c);
     t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
     return t;

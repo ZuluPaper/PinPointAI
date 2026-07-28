@@ -88,22 +88,71 @@ function makeFatiguesTextures() {
   return { albedo, normal };
 }
 
+// Fresnel rim + a floor on the darkest tone, injected into a standard material.
+// This is the core readability aid: under harsh golden-hour backlight the
+// player-facing side of a soldier receives almost no direct light and would
+// otherwise crush to pure black, vanishing into the shadowed laterite. The rim
+// term lights the silhouette edge (a cool sky-bounce) so the outline reads
+// against the blown-out sky, while the ambient floor guarantees the body never
+// falls below a legible value against the dark ground. Both are view/normal
+// driven in-shader, so they cost nothing extra per enemy (materials are shared)
+// and never wash the model out in flat light.
+function applyReadability(mat, opts = {}) {
+  const rimColor = opts.rimColor || new THREE.Color(0x9fb8d6); // cool sky-bounce
+  const rimPower = opts.rimPower != null ? opts.rimPower : 2.6;
+  const rimStrength = opts.rimStrength != null ? opts.rimStrength : 0.55;
+  const floor = opts.floor != null ? opts.floor : 0.16; // min value vs. crushed black
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uRimColor = { value: rimColor };
+    shader.uniforms.uRimPower = { value: rimPower };
+    shader.uniforms.uRimStrength = { value: rimStrength };
+    shader.uniforms.uReadFloor = { value: floor };
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>',
+        '#include <common>\nuniform vec3 uRimColor;\nuniform float uRimPower;\nuniform float uRimStrength;\nuniform float uReadFloor;')
+      .replace('#include <dithering_fragment>', `
+        {
+          vec3 vdir = normalize(vViewPosition);
+          float ndv = clamp(dot(normalize(normal), vdir), 0.0, 1.0);
+          float rim = pow(1.0 - ndv, uRimPower);
+          // lift the darkest pixels toward a legible floor, then add the rim edge
+          gl_FragColor.rgb = max(gl_FragColor.rgb, diffuseColor.rgb * uReadFloor);
+          gl_FragColor.rgb += uRimColor * rim * uRimStrength;
+        }
+        #include <dithering_fragment>`);
+  };
+  mat.needsUpdate = true;
+  return mat;
+}
+
 function buildAssets() {
   if (ASSETS) return ASSETS;
   const fat = makeFatiguesTextures();
 
+  // Uniform tones are nudged brighter and slightly desaturated (and cooled off
+  // the reddish laterite) via emissive fills so the crushed-shadow side keeps a
+  // readable value and hue instead of going to black under backlight.
   const mats = {
     fatigues: new THREE.MeshStandardMaterial({
-      map: fat.albedo, normalMap: fat.normal, roughness: 0.92, metalness: 0.02,
+      map: fat.albedo, normalMap: fat.normal, roughness: 0.9, metalness: 0.02,
       normalScale: new THREE.Vector2(0.6, 0.6),
+      emissive: 0x3b3a24, emissiveIntensity: 0.55,
     }),
-    skin: new THREE.MeshStandardMaterial({ color: 0x6b4a34, roughness: 0.72 }),
-    webbing: new THREE.MeshStandardMaterial({ color: 0x2b2a22, roughness: 0.7, metalness: 0.05 }),
-    helmet: new THREE.MeshStandardMaterial({ color: 0x4a4a30, roughness: 0.6, metalness: 0.15 }),
-    boot: new THREE.MeshStandardMaterial({ color: 0x1c1a15, roughness: 0.55, metalness: 0.1 }),
-    metal: new THREE.MeshStandardMaterial({ color: 0x24262a, roughness: 0.45, metalness: 0.75 }),
-    wood: new THREE.MeshStandardMaterial({ color: 0x5b3a1e, roughness: 0.6, metalness: 0.05 }),
+    skin: new THREE.MeshStandardMaterial({ color: 0x7a5540, roughness: 0.72, emissive: 0x2a1a12, emissiveIntensity: 0.5 }),
+    webbing: new THREE.MeshStandardMaterial({ color: 0x33322a, roughness: 0.7, metalness: 0.05, emissive: 0x1a1a14, emissiveIntensity: 0.5 }),
+    helmet: new THREE.MeshStandardMaterial({ color: 0x53533a, roughness: 0.6, metalness: 0.15, emissive: 0x26260f, emissiveIntensity: 0.5 }),
+    boot: new THREE.MeshStandardMaterial({ color: 0x252219, roughness: 0.55, metalness: 0.1, emissive: 0x14130e, emissiveIntensity: 0.55 }),
+    metal: new THREE.MeshStandardMaterial({ color: 0x2e3036, roughness: 0.45, metalness: 0.7, emissive: 0x101216, emissiveIntensity: 0.5 }),
+    wood: new THREE.MeshStandardMaterial({ color: 0x6a4523, roughness: 0.6, metalness: 0.05, emissive: 0x211407, emissiveIntensity: 0.5 }),
   };
+  // Patch every soldier material once with the shared rim/floor readability aid.
+  applyReadability(mats.fatigues, { rimStrength: 0.55, floor: 0.17 });
+  applyReadability(mats.skin, { rimStrength: 0.45, floor: 0.18 });
+  applyReadability(mats.webbing, { rimStrength: 0.6, floor: 0.15 });
+  applyReadability(mats.helmet, { rimStrength: 0.6, floor: 0.16 });
+  applyReadability(mats.boot, { rimStrength: 0.6, floor: 0.14 });
+  applyReadability(mats.metal, { rimStrength: 0.7, rimPower: 2.2, floor: 0.13 });
+  applyReadability(mats.wood, { rimStrength: 0.5, floor: 0.16 });
 
   const geos = {
     head: new THREE.SphereGeometry(0.135, 12, 12),
@@ -123,7 +172,23 @@ function buildAssets() {
     rifleStock: new THREE.BoxGeometry(0.05, 0.1, 0.24),
   };
 
-  ASSETS = { mats, geos };
+  // Soft radial contact-shadow decal: grounds each soldier and gives the
+  // silhouette a dark anchor to pop against the pale backlit grass/sky.
+  const shadowC = makeCanvas(64);
+  const sc = shadowC.getContext('2d');
+  const grad = sc.createRadialGradient(32, 32, 2, 32, 32, 30);
+  grad.addColorStop(0, 'rgba(0,0,0,0.55)');
+  grad.addColorStop(0.6, 'rgba(0,0,0,0.28)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  sc.fillStyle = grad; sc.fillRect(0, 0, 64, 64);
+  const shadowTex = new THREE.CanvasTexture(shadowC);
+  const shadowMat = new THREE.MeshBasicMaterial({
+    map: shadowTex, transparent: true, depthWrite: false,
+    opacity: 0.85, blending: THREE.NormalBlending,
+  });
+  const shadowGeo = new THREE.PlaneGeometry(1, 1);
+
+  ASSETS = { mats, geos, shadowMat, shadowGeo };
   return ASSETS;
 }
 
@@ -641,8 +706,11 @@ export class EnemyManager {
   constructor(ctx) { this.ctx = ctx; this.enemies = []; }
 
   async init() {
-    // Spawn points with a small patrol loop generated around each.
+    // Spawn points with a small patrol loop generated around each. The first
+    // two sit in the near engagement zone (~12-16m ahead) so the player always
+    // has a readable, legible combatant in frame from the opening advance.
     const spots = [
+      [-4, 13], [7, 16],
       [-14, 24], [12, 30], [-24, 48], [20, 55], [0, 70], [-30, 82], [28, 92], [-8, 105],
     ];
     for (const [x, z] of spots) {
@@ -650,11 +718,42 @@ export class EnemyManager {
       const spawn = new THREE.Vector3(x, y, -z);
       this.enemies.push(new Enemy(this.ctx, spawn, this._makeRoute(spawn)));
     }
+    this._buildShadows();
     this.remaining = this.enemies.length;
     this.ctx.on('enemy-killed', () => {
       this.remaining--;
       if (this.remaining <= 0) this.ctx.hud?.setObjective?.('Sector cleared. Hold position.');
     });
+  }
+
+  // One pooled InstancedMesh drives every soldier's contact shadow — a single
+  // draw call for all of them, updated to the feet each frame.
+  _buildShadows() {
+    const { shadowMat, shadowGeo } = buildAssets();
+    const mesh = new THREE.InstancedMesh(shadowGeo, shadowMat, this.enemies.length);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = -1; // draw before enemies so their rim/body sits on top
+    this.ctx.scene.add(mesh);
+    this.shadowMesh = mesh;
+    this._shadowDummy = new THREE.Object3D();
+    this._shadowDummy.rotation.x = -Math.PI / 2; // lay flat on the ground
+  }
+
+  _updateShadows() {
+    const mesh = this.shadowMesh;
+    if (!mesh) return;
+    const dummy = this._shadowDummy;
+    for (let i = 0; i < this.enemies.length; i++) {
+      const e = this.enemies[i];
+      // Dead soldiers spread their shadow (toppled body); living ones tighten it.
+      const dead = e.state === STATE.DEAD;
+      const s = dead ? 1.55 : 1.15 - e.crouch * 0.15;
+      dummy.position.set(e.position.x, e.position.y + 0.03, e.position.z);
+      dummy.scale.set(s, s, s);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    }
+    mesh.instanceMatrix.needsUpdate = true;
   }
 
   // Build a short 3-4 point patrol loop around a spawn, snapped to terrain.
@@ -699,5 +798,6 @@ export class EnemyManager {
   update(dt) {
     const p = this.ctx.player.position;
     for (const e of this.enemies) e.update(dt, p);
+    this._updateShadows();
   }
 }

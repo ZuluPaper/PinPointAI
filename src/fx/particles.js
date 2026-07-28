@@ -101,24 +101,40 @@ function makeSparkTexture() {
 }
 
 function makeFlashTexture() {
-  // Muzzle flash: bright white-hot star.
-  const c = canvas(128); const g = c.getContext('2d'); const r = 64;
-  const grad = g.createRadialGradient(r, r, 0, r, r, r);
-  grad.addColorStop(0, 'rgba(255,255,246,1)');
-  grad.addColorStop(0.3, 'rgba(255,226,150,0.9)');
-  grad.addColorStop(0.7, 'rgba(255,150,60,0.35)');
-  grad.addColorStop(1, 'rgba(255,120,40,0)');
-  g.fillStyle = grad; g.fillRect(0, 0, 128, 128);
-  // radiating spikes
+  // Muzzle flash: bright white-hot star with a hard incandescent core and a
+  // ragged radial burst so a 7.62 shot reads with real punch even against sky.
+  const size = 256; const c = canvas(size); const g = c.getContext('2d'); const r = size * 0.5;
   g.globalCompositeOperation = 'lighter';
-  g.strokeStyle = 'rgba(255,236,180,0.85)'; g.lineCap = 'round';
-  for (let i = 0; i < 6; i++) {
-    const a = (i / 6) * Math.PI * 2 + Math.random() * 0.3;
-    const len = r * (0.6 + Math.random() * 0.4);
-    g.lineWidth = 2 + Math.random() * 3;
+  // 1) broad warm halo
+  const halo = g.createRadialGradient(r, r, 0, r, r, r);
+  halo.addColorStop(0, 'rgba(255,244,210,0.9)');
+  halo.addColorStop(0.35, 'rgba(255,196,110,0.5)');
+  halo.addColorStop(0.7, 'rgba(255,140,50,0.18)');
+  halo.addColorStop(1, 'rgba(255,110,30,0)');
+  g.fillStyle = halo; g.fillRect(0, 0, size, size);
+  // 2) long ragged spikes (star burst) — varied length/width, a few long ones
+  g.strokeStyle = 'rgba(255,238,190,0.9)'; g.lineCap = 'round';
+  const spikes = 11;
+  for (let i = 0; i < spikes; i++) {
+    const a = (i / spikes) * Math.PI * 2 + (Math.random() - 0.5) * 0.35;
+    const long = Math.random() < 0.35;
+    const len = r * (long ? 0.85 + Math.random() * 0.13 : 0.4 + Math.random() * 0.35);
+    g.lineWidth = 1.5 + Math.random() * (long ? 5 : 3);
+    const grd = g.createLinearGradient(r, r, r + Math.cos(a) * len, r + Math.sin(a) * len);
+    grd.addColorStop(0, 'rgba(255,246,214,0.95)');
+    grd.addColorStop(0.5, 'rgba(255,210,130,0.55)');
+    grd.addColorStop(1, 'rgba(255,150,60,0)');
+    g.strokeStyle = grd;
     g.beginPath(); g.moveTo(r, r);
     g.lineTo(r + Math.cos(a) * len, r + Math.sin(a) * len); g.stroke();
   }
+  // 3) dense white-hot core (small, saturated) — the actual muzzle bloom
+  const core = g.createRadialGradient(r, r, 0, r, r, r * 0.32);
+  core.addColorStop(0, 'rgba(255,255,255,1)');
+  core.addColorStop(0.4, 'rgba(255,250,232,0.95)');
+  core.addColorStop(0.75, 'rgba(255,214,140,0.6)');
+  core.addColorStop(1, 'rgba(255,170,80,0)');
+  g.fillStyle = core; g.beginPath(); g.arc(r, r, r * 0.32, 0, Math.PI * 2); g.fill();
   return toTex(c);
 }
 
@@ -185,10 +201,10 @@ function makeDecalTexture(tint) {
 const _c0 = new THREE.Color(), _c1 = new THREE.Color();
 
 class SpritePool {
-  constructor(scene, tex, size, { additive = false, renderOrder = 0 } = {}) {
+  constructor(scene, tex, size, { additive = false, renderOrder = 0, toneMapped = true } = {}) {
     this.items = [];
     const base = new THREE.SpriteMaterial({
-      map: tex, transparent: true, depthWrite: false,
+      map: tex, transparent: true, depthWrite: false, toneMapped,
       blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
     });
     for (let i = 0; i < size; i++) {
@@ -473,8 +489,9 @@ export class ParticleSystem {
     this.dust = new SpritePool(scene, this.dustTex, 56);
     this.haze = new SpritePool(scene, this.hazeTex, 16, { renderOrder: -1 });
     this.debris = new SpritePool(scene, this.dustTex, 48);
-    this.sparks = new SpritePool(scene, this.sparkTex, 90, { additive: true, renderOrder: 6 });
-    this.flash = new SpritePool(scene, this.flashTex, 12, { additive: true, renderOrder: 7 });
+    this.sparks = new SpritePool(scene, this.sparkTex, 90, { additive: true, renderOrder: 6, toneMapped: false });
+    this.flash = new SpritePool(scene, this.flashTex, 16, { additive: true, renderOrder: 7, toneMapped: false });
+    this.heat = new SpritePool(scene, this.hazeTex, 12, { additive: true, renderOrder: 4, toneMapped: false });
     this.blood = new SpritePool(scene, this.bloodTex, 56);
 
     // specialised pools
@@ -482,35 +499,83 @@ export class ParticleSystem {
     this.casings = new CasingPool(scene, this.ctx, 28);
     this.decals = new DecalPool(scene, 32);
 
+    // Muzzle flash light — one warm PointLight pulsed on each shot so the
+    // weapon and nearby ground get a real kick of light at the moment of firing.
+    this._muzzleLight = new THREE.PointLight(0xffb060, 0, 9, 2.0);
+    this._muzzleLight.castShadow = false;
+    scene.add(this._muzzleLight);
+    this._muzzleLightPeak = 0;   // intensity to decay from
+    this._muzzleLightAge = 1e3;  // seconds since last flash (large = idle)
+
     this._tmp = new THREE.Vector3();
     this._right = new THREE.Vector3();
   }
 
-  // --- Muzzle: bright flash + rolling barrel smoke + a couple of embers -----
+  // --- Muzzle: bright flash + light pop + warm smoke + heat-haze + embers -----
   spawnMuzzleSmoke(pos) {
-    // hot flash (very short)
+    // Big radial-star flash: a 1-2 frame pop with a random roll so repeats don't
+    // look stamped. Untonemapped + additive so it reads even against bright sky.
     this.flash.spawn(pos, {
-      life: 0.06, scale: 0.5, scaleEnd: 0.72, opacity: 1, fadeIn: 0.0, drag: 4,
+      life: 0.05, scale: 0.55, scaleEnd: 0.95, opacity: 1, fadeIn: 0.0, drag: 4,
+      rot: Math.random() * Math.PI * 2,
     });
-    // rolling smoke puffs drifting up and slightly forward
+    // Tight ultra-bright incandescent core stacked on top of the star.
+    this.flash.spawn(pos, {
+      life: 0.045, scale: 0.26, scaleEnd: 0.4, opacity: 1, fadeIn: 0.0, drag: 4,
+      rot: Math.random() * Math.PI * 2,
+    });
+
+    // Synced muzzle light — warm kick on weapon + nearby ground, decays in update.
+    if (this._muzzleLight) {
+      this._muzzleLight.position.copy(pos);
+      this._muzzleLightPeak = 14 + Math.random() * 4;
+      this._muzzleLight.intensity = this._muzzleLightPeak;
+      this._muzzleLightAge = 0;
+    }
+
+    // Warm smoke puff — brief and fast-dissipating (hot gas, not lingering haze).
     for (let i = 0; i < 2; i++) {
       this.smoke.spawn(pos, {
-        life: 0.7 + Math.random() * 0.4,
-        scale: 0.14, grow: 0.9,
-        opacity: 0.5,
-        drag: 1.8,
-        rotVel: (Math.random() - 0.5) * 2.5,
-        color: '#b8b0a2', colorEnd: '#7d766a',
-        vel: this._tmp.set((Math.random() - 0.5) * 0.6, 0.5 + Math.random() * 0.4, (Math.random() - 0.5) * 0.6),
+        life: 0.45 + Math.random() * 0.25,
+        scale: 0.12, grow: 0.7,
+        opacity: 0.42,
+        drag: 2.6,
+        rotVel: (Math.random() - 0.5) * 3,
+        color: '#d8c4a0', colorEnd: '#8a8074',
+        vel: this._tmp.set((Math.random() - 0.5) * 0.7, 0.6 + Math.random() * 0.5, (Math.random() - 0.5) * 0.7),
       });
     }
-    // faint warm embers
-    for (let i = 0; i < 3; i++) {
+
+    // Barrel heat-haze — a faint warm shimmer rising off the hot barrel.
+    this.heat.spawn(pos, {
+      life: 0.32, scale: 0.18, grow: 0.5, opacity: 0.22, fadeIn: 0.15, drag: 2,
+      color: '#ffcaa0',
+      vel: this._tmp.set((Math.random() - 0.5) * 0.2, 0.9, (Math.random() - 0.5) * 0.2),
+    });
+
+    // Bright warm embers spat forward from the barrel.
+    for (let i = 0; i < 4; i++) {
       this.sparks.spawn(pos, {
-        life: 0.18, scale: 0.05, opacity: 0.9, fadeIn: 0, drag: 2,
-        gravity: 3,
-        vel: this._tmp.set((Math.random() - 0.5) * 2, Math.random() * 1.2, (Math.random() - 0.5) * 2),
+        life: 0.16 + Math.random() * 0.1, scale: 0.05 + Math.random() * 0.03,
+        opacity: 1, fadeIn: 0, drag: 2, gravity: 3,
+        vel: this._tmp.set((Math.random() - 0.5) * 2.4, Math.random() * 1.3, (Math.random() - 0.5) * 2.4),
       });
+    }
+
+    // Near-ground dust displacement — if firing low, the muzzle blast kicks up
+    // a little laterite from the ground below.
+    const env = this.ctx.environment;
+    const gy = (env && env.getHeight) ? env.getHeight(pos.x, pos.z) : 0;
+    if (pos.y - gy < 1.4) {
+      const dpos = this._tmp.set(pos.x, gy + 0.02, pos.z).clone();
+      for (let i = 0; i < 2; i++) {
+        this.dust.spawn(dpos, {
+          life: 0.5 + Math.random() * 0.3, scale: 0.1, grow: 0.6, opacity: 0.4,
+          drag: 2.4, rotVel: (Math.random() - 0.5) * 2,
+          color: '#c8a874', colorEnd: '#9c7f4c',
+          vel: this._tmp.set((Math.random() - 0.5) * 1.2, 0.5 + Math.random() * 0.4, (Math.random() - 0.5) * 1.2),
+        });
+      }
     }
   }
 
@@ -625,11 +690,20 @@ export class ParticleSystem {
     this.debris.update(dt);
     this.sparks.update(dt);
     this.flash.update(dt);
+    this.heat.update(dt);
     this.blood.update(dt);
     this.decals.update(dt);
     this.casings.update(dt);
     const cam = this.ctx.camera;
     this.tracers.update(dt, cam ? cam.position : _ZERO);
+    // Muzzle light: fast exponential-ish decay so it flashes and is gone (~0.06s).
+    if (this._muzzleLight && this._muzzleLight.intensity > 0.01) {
+      this._muzzleLightAge += dt;
+      const k = Math.max(0, 1 - this._muzzleLightAge / 0.07);
+      this._muzzleLight.intensity = this._muzzleLightPeak * k * k;
+    } else if (this._muzzleLight) {
+      this._muzzleLight.intensity = 0;
+    }
   }
 
   // --- helpers ---------------------------------------------------------------

@@ -38,8 +38,15 @@ export class HUD {
     this._reloadMax = 0;
     this._prevReloading = 0;
     this._magMax = 1;          // largest mag seen for current weapon -> low-ammo scaling
+    this._prevRecoil = 0;      // rising-edge detect for muzzle-flash crosshair feedback
+    this._fireT = 0;           // firing-flash timer
+    this._firing = false;      // cached firing state (avoid per-frame classList churn)
     // change-detection caches (avoid per-frame DOM churn)
     this._c = { mag: -1, reserve: -1, hp: -1, sta: -1, spread: -1, ads: -1, heading: -999, reloading: false };
+
+    // Style polish + strip the raw debug read-out for review builds.
+    this._injectStyle();
+    this._gateDebug();
 
     this._buildCompass();
     this._buildDamagePool();
@@ -95,6 +102,78 @@ export class HUD {
       this.dmgLayer.appendChild(el);
       this._dmg.push({ el, t: 0 });
     }
+  }
+
+  // ---- dev-gate the raw FPS/debug read-out ----
+  // The counter itself is written by main.js; a shipping review build should not
+  // show it. Hide unless a dev explicitly opts in via ?fps / #dev / #debug in the
+  // URL, a global flag, or a stored preference. No other module is touched.
+  _gateDebug() {
+    const fpsEl = document.getElementById('fps-counter');
+    if (!fpsEl) return;
+    let dev = false;
+    try {
+      const q = (location.search + ' ' + location.hash).toLowerCase();
+      dev = /\b(dev|debug|fps)\b/.test(q)
+        || window.KWANZA_DEV === true
+        || (window.localStorage && localStorage.getItem('kwanza-debug') === '1');
+    } catch (_) { /* sandboxed / no storage — stay hidden */ }
+    if (!dev) { fpsEl.style.display = 'none'; fpsEl.setAttribute('aria-hidden', 'true'); }
+    else { fpsEl.classList.add('dev-on'); }
+  }
+
+  // ---- HUD styling polish, owned by this module ----
+  // Injected as a single stylesheet (appended after index.html's <head> rules so it
+  // wins on equal specificity). Goals from art review: legibility over blown-white
+  // sky (dark stroke/backing on objective, compass, ammo), a contrast-stroked
+  // crosshair with firing feedback, and unified military-UI typography.
+  _injectStyle() {
+    if (document.getElementById('hud-polish')) return;
+    const s = document.createElement('style');
+    s.id = 'hud-polish';
+    // A crisp dark stroke (4-way 1px) + soft drop makes text hold on any background.
+    const stroke = '-1px -1px 0 rgba(0,0,0,0.9), 1px -1px 0 rgba(0,0,0,0.9), '
+                 + '-1px 1px 0 rgba(0,0,0,0.9), 1px 1px 0 rgba(0,0,0,0.9)';
+    s.textContent = `
+      /* ---------- legibility over bright sky ---------- */
+      #objective { padding-top: 4px; padding-bottom: 4px;
+        background: linear-gradient(90deg, rgba(8,8,6,0.42), rgba(8,8,6,0.0) 92%); }
+      #objective .tag { color: var(--accent); font-weight: bold;
+        text-shadow: ${stroke}, 0 1px 4px rgba(0,0,0,0.7); }
+      #objective-text { color: var(--ink); font-weight: bold;
+        text-shadow: ${stroke}, 0 2px 6px rgba(0,0,0,0.6); }
+
+      /* compass: dark halo on ticks + labels so the tape survives white sky */
+      #compass { background: linear-gradient(180deg, rgba(6,6,5,0.30), rgba(6,6,5,0.06)); }
+      #compass-tape { filter: drop-shadow(0 1px 1px rgba(0,0,0,0.95)); }
+      #compass .mk .lbl { font-weight: bold; text-shadow: ${stroke}; }
+      #compass-heading { color: var(--accent); opacity: 1; font-weight: bold;
+        text-shadow: ${stroke}, 0 1px 3px rgba(0,0,0,0.7); }
+
+      /* ammo + weapon: stronger backing so the big numerals never blow out */
+      #ammo { text-shadow: ${stroke}, 0 3px 10px rgba(0,0,0,0.7); }
+      #weapon-name { color: var(--ink-dim); font-weight: bold; text-shadow: ${stroke}; }
+      #health-num { text-shadow: ${stroke}; }
+      #kill-feed .kf { font-weight: bold; }
+
+      /* ---------- crosshair: contrast stroke + state feedback ---------- */
+      #crosshair .line, #crosshair .dot {
+        background: rgba(240,233,216,0.96);
+        box-shadow: 0 0 0 1px rgba(0,0,0,0.6), 0 0 3px rgba(0,0,0,0.95); }
+      /* muzzle-flash tick: crosshair briefly warms to brass on fire */
+      #crosshair.firing .line, #crosshair.firing .dot {
+        background: var(--accent);
+        box-shadow: 0 0 0 1px rgba(0,0,0,0.6), 0 0 6px rgba(201,164,92,0.85); }
+      #crosshair .dot { transition: background 0.05s linear; }
+
+      /* ---------- unified typography: even military tracking ---------- */
+      #hud { font-variant-numeric: tabular-nums; }
+      #reload-label, #compass-heading, #weapon-name { text-transform: uppercase; }
+
+      /* keep the debug read-out unobtrusive even when a dev opts back in */
+      #fps-counter.dev-on { opacity: 0.5; }
+    `;
+    (document.head || document.documentElement).appendChild(s);
   }
 
   // ---- incoming damage: red flash + directional arc ----
@@ -211,13 +290,20 @@ export class HUD {
     const staPct = this._stamina * 100;
     if (Math.abs(staPct - c.sta) > 0.8) { this.staminaFill.style.width = `${staPct}%`; c.sta = staPct; }
 
-    // --- crosshair: dynamic spread + ADS fade ---
+    // --- crosshair: dynamic spread + ADS fade + fire feedback ---
+    const recoil = w.recoil || 0;         // harmless if weapon has no .recoil
     const moveSpread = Math.hypot(p.velocity.x, p.velocity.z) * 1.15;
-    const fireSpread = (w.recoil || 0) * 8; // harmless if weapon has no .recoil
+    const fireSpread = recoil * 8;
     const ads = w.ads || 0;
     const spread = Math.max(2, 7 + moveSpread + fireSpread - ads * 9);
     if (Math.abs(spread - c.spread) > 0.3) { this.crosshair.style.setProperty('--sp', `${spread}px`); c.spread = spread; }
     if (Math.abs(ads - c.ads) > 0.02) { this.crosshair.style.opacity = `${1 - ads * 0.9}`; c.ads = ads; }
+    // Rising recoil edge = a shot was fired -> brief brass muzzle-flash tick.
+    if (recoil > this._prevRecoil + 0.015) this._fireT = 0.07;
+    this._prevRecoil = recoil;
+    if (this._fireT > 0) this._fireT = Math.max(0, this._fireT - dt);
+    const firing = this._fireT > 0;
+    if (firing !== this._firing) { this.crosshair.classList.toggle('firing', firing); this._firing = firing; }
 
     // --- compass tape ---
     let deg = (-p.yaw * 180 / Math.PI) % 360; if (deg < 0) deg += 360;

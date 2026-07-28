@@ -307,12 +307,178 @@ export class Level {
       glass: new THREE.MeshStandardMaterial({ color: 0x1a2230, roughness: 0.15, metalness: 0.4 }),
       dark: new THREE.MeshStandardMaterial({ color: 0x0a0a0c, roughness: 1 }),
       tyre: new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 0.95 }),
+      // Shadowed room depth seen through window openings: dark warm brown, faintly lit.
+      winInterior: new THREE.MeshStandardMaterial({
+        color: 0x1c1206, emissive: 0x2a1a0c, emissiveIntensity: 0.35,
+        roughness: 1, metalness: 0, side: THREE.DoubleSide,
+      }),
       // foliage
-      palmTrunk: new THREE.MeshStandardMaterial({ color: 0x6a5230, roughness: 0.95 }),
-      frond: new THREE.MeshStandardMaterial({ color: 0x4d6a2e, roughness: 0.85, side: THREE.DoubleSide }),
+      palmTrunk: this._palmTrunkMaterial(),
+      frond: this._frondMaterial(),
       bush: new THREE.MeshStandardMaterial({ color: 0x40532a, roughness: 0.95 }),
-      grass: new THREE.MeshStandardMaterial({ color: 0x8f8a45, roughness: 1, side: THREE.DoubleSide }),
+      grass: this._grassMaterial(),
     };
+  }
+
+  // --- Palm bark: textured wood with leaf-scar rings & vertical ridges -------
+  _palmTrunkMaterial() {
+    const S = 256;
+    const { c: ac, g: ag } = this._canvas(S);
+    ag.fillStyle = '#6a5230'; ag.fillRect(0, 0, S, S);
+    // vertical bark columns / value variation
+    for (let x = 0; x < S; x++) {
+      const n = 0.5 + 0.5 * Math.sin(x * 0.13) + (Math.random() - 0.5) * 0.35;
+      const v = 0.65 + 0.35 * Math.max(0, Math.min(1, n));
+      ag.fillStyle = `rgba(${(58 * v) | 0},${(44 * v) | 0},${(26 * v) | 0},0.4)`;
+      ag.fillRect(x, 0, 1, S);
+    }
+    // horizontal leaf-scar rings (the diamond-banded palm look)
+    for (let y = 4; y < S; y += 12 + Math.random() * 7) {
+      ag.fillStyle = 'rgba(34,24,12,0.55)'; ag.fillRect(0, y, S, 2 + Math.random() * 2);
+      ag.fillStyle = 'rgba(158,134,92,0.18)'; ag.fillRect(0, y - 2, S, 1);
+    }
+    this._valueNoise(ag, S, 40, 0.5, [38, 28, 15]);
+    this._valueNoise(ag, S, 22, 0.4, [128, 106, 66]);
+
+    // height map: ridges + recessed scar grooves
+    const { c: hc, g: hg } = this._canvas(S);
+    hg.fillStyle = '#808080'; hg.fillRect(0, 0, S, S);
+    for (let x = 0; x < S; x++) {
+      const v = 128 + Math.sin(x * 0.38) * 26 + (Math.random() - 0.5) * 22;
+      hg.fillStyle = `rgb(${v | 0},${v | 0},${v | 0})`;
+      hg.fillRect(x, 0, 1, S);
+    }
+    for (let y = 4; y < S; y += 12 + Math.random() * 7) {
+      hg.fillStyle = '#484848'; hg.fillRect(0, y, S, 3);
+      hg.fillStyle = '#c0c0c0'; hg.fillRect(0, y - 2, S, 1);
+    }
+    const map = this._finishTex(ac, { srgb: true }); map.repeat.set(1, 2.2);
+    const normalMap = this._normalFromHeight(hc, 1.8); normalMap.repeat.set(1, 2.2);
+    return new THREE.MeshStandardMaterial({
+      map, normalMap, roughness: 0.92, metalness: 0.0,
+      normalScale: new THREE.Vector2(1.0, 1.0),
+    });
+  }
+
+  // --- Palm frond: alpha-cut feathered leaf (pinnate leaflets on a rachis) ---
+  _frondMaterial() {
+    const W = 128, H = 512;
+    const c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    const g = c.getContext('2d');
+    g.clearRect(0, 0, W, H);
+    const cx = W / 2;
+    // In UV space, tip is at top (y small), base at bottom (y large).
+    const leafCol = (t) => { // t: 0 near tip .. 1 near base
+      const r = 44 + (1 - t) * 26, gg = 74 + t * 46, b = 26 + t * 16;
+      return `rgb(${r | 0},${gg | 0},${b | 0})`;
+    };
+    // central rachis (spine)
+    g.strokeStyle = '#57692a'; g.lineWidth = 5;
+    g.lineCap = 'round';
+    g.beginPath(); g.moveTo(cx, 10); g.lineTo(cx, H - 10); g.stroke();
+    // leaflets fanning off both sides, longest mid-frond, sweeping toward tip
+    const n = 58;
+    for (let i = 0; i < n; i++) {
+      const t = i / (n - 1);            // 0 tip .. 1 base
+      const y = 14 + t * (H - 28);
+      const len = 8 + Math.sin(t * Math.PI) * (W * 0.46);
+      const sweep = 26 * (1 - t) + 6;   // leaflets angle toward the tip
+      g.strokeStyle = leafCol(t);
+      g.lineWidth = 3;
+      for (const dir of [-1, 1]) {
+        g.beginPath();
+        g.moveTo(cx, y);
+        g.quadraticCurveTo(cx + dir * len * 0.5, y - sweep * 0.4, cx + dir * len, y - sweep);
+        g.stroke();
+      }
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = this._maxAniso;
+    tex.needsUpdate = true;
+    // map's own alpha channel drives the cutout (alphaTest); no alphaMap needed.
+    return new THREE.MeshStandardMaterial({
+      map: tex, transparent: false, alphaTest: 0.4,
+      side: THREE.DoubleSide, roughness: 0.82, metalness: 0.0,
+    });
+  }
+
+  // --- Dry grass blade: alpha-cut pointed blade with a soft edge ------------
+  _grassBladeTexture() {
+    const W = 32, H = 64;
+    const c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    const g = c.getContext('2d');
+    g.clearRect(0, 0, W, H);
+    // white blade shape (alpha only) — tapered, pointed tip at top
+    g.fillStyle = '#ffffff';
+    g.beginPath();
+    g.moveTo(W * 0.5, 1);           // tip
+    g.quadraticCurveTo(W * 0.9, H * 0.5, W * 0.72, H);  // right edge
+    g.lineTo(W * 0.28, H);
+    g.quadraticCurveTo(W * 0.1, H * 0.5, W * 0.5, 1);   // left edge
+    g.fill();
+    const tex = new THREE.CanvasTexture(c);
+    tex.anisotropy = this._maxAniso;
+    tex.needsUpdate = true;
+    return tex;
+  }
+
+  _grassMaterial() {
+    // Darkened base value + vertex-color gradient keeps backlit tufts from
+    // glowing like paper slabs; alpha cutout removes hard rectangle edges.
+    return new THREE.MeshStandardMaterial({
+      color: 0x9a9250, vertexColors: true,
+      alphaMap: this._grassBladeTexture(), transparent: false, alphaTest: 0.45,
+      roughness: 1.0, metalness: 0.0, side: THREE.DoubleSide,
+    });
+  }
+
+  // Crossed-quad tapered grass tuft with a root→tip vertex-color gradient.
+  _grassBladeGeometry() {
+    const h = 0.62, wB = 0.11, wT = 0.02;
+    const root = [0.16, 0.13, 0.05];   // dark shadowed root
+    const tip = [0.78, 0.72, 0.34];    // pale gold tip
+    const positions = [], colors = [], uvs = [], indices = [];
+    let v = 0;
+    const addBlade = (axis) => {
+      // axis 0: blade spans X (faces ±Z); axis 1: blade spans Z (faces ±X)
+      const corners = axis === 0
+        ? [[-wB / 2, 0, 0], [wB / 2, 0, 0], [wT / 2, h, 0], [-wT / 2, h, 0]]
+        : [[0, 0, -wB / 2], [0, 0, wB / 2], [0, h, wT / 2], [0, h, -wT / 2]];
+      const uvC = [[0, 0], [1, 0], [1, 1], [0, 1]];
+      const colC = [root, root, tip, tip];
+      for (let k = 0; k < 4; k++) {
+        positions.push(corners[k][0], corners[k][1], corners[k][2]);
+        colors.push(colC[k][0], colC[k][1], colC[k][2]);
+        uvs.push(uvC[k][0], uvC[k][1]);
+      }
+      indices.push(v, v + 1, v + 2, v, v + 2, v + 3);
+      v += 4;
+    };
+    addBlade(0); addBlade(1);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geo.setIndex(indices);
+    geo.computeVertexNormals();
+    return geo;
+  }
+
+  // A jagged triangular glass shard (for broken window frames).
+  _shardGeometry(w, h) {
+    const geo = new THREE.BufferGeometry();
+    const jx = (Math.random() - 0.5) * w * 0.5;
+    geo.setAttribute('position', new THREE.Float32BufferAttribute([
+      -w / 2, -h / 2, 0,
+      w / 2, -h / 2 + (Math.random() - 0.5) * h * 0.3, 0,
+      jx, h / 2, 0,
+    ], 3));
+    geo.setIndex([0, 1, 2]);
+    geo.computeVertexNormals();
+    return geo;
   }
 
   // ---------------------------------------------------------------------------
@@ -398,15 +564,54 @@ export class Level {
     roofGroup.add(ridge);
     g.add(roofGroup);
 
-    // windows & door on the front (+z) face, recessed dark with broken glass
+    // windows & door on the front (+z) face: recessed interior room shell so
+    // the opening reads as depth into a solid volume, not a black billboard hole.
     const halfD = d / 2 + 0.01;
     const addWindow = (wx, wy, ww = 1.1, wh = 1.3) => {
-      const frame = new THREE.Mesh(new THREE.BoxGeometry(ww + 0.2, wh + 0.2, 0.15), this._mats.beam);
+      const frame = new THREE.Mesh(new THREE.BoxGeometry(ww + 0.2, wh + 0.2, 0.18), this._mats.beam);
       frame.position.set(wx, wy, halfD);
-      const pane = new THREE.Mesh(new THREE.PlaneGeometry(ww, wh),
-        Math.random() > 0.5 ? this._mats.dark : this._mats.glass);
-      pane.position.set(wx, wy, halfD + 0.08);
-      g.add(frame, pane);
+      g.add(frame);
+
+      // Shallow recessed interior: back wall + 4 sides, faintly-lit warm brown.
+      const depth = 0.6 + Math.random() * 0.25;
+      const zi = halfD - depth;               // interior back plane (into the wall)
+      const wi = this._mats.winInterior;
+      const back = new THREE.Mesh(new THREE.PlaneGeometry(ww, wh), wi);
+      back.position.set(wx, wy, zi);
+      const sideGeo = new THREE.PlaneGeometry(depth, wh);
+      const sL = new THREE.Mesh(sideGeo, wi);
+      sL.rotation.y = Math.PI / 2; sL.position.set(wx - ww / 2, wy, halfD - depth / 2);
+      const sR = new THREE.Mesh(sideGeo, wi);
+      sR.rotation.y = -Math.PI / 2; sR.position.set(wx + ww / 2, wy, halfD - depth / 2);
+      const capGeo = new THREE.PlaneGeometry(ww, depth);
+      const cTop = new THREE.Mesh(capGeo, wi);
+      cTop.rotation.x = Math.PI / 2; cTop.position.set(wx, wy + wh / 2, halfD - depth / 2);
+      const cBot = new THREE.Mesh(capGeo, wi);
+      cBot.rotation.x = -Math.PI / 2; cBot.position.set(wx, wy - wh / 2, halfD - depth / 2);
+      g.add(back, sL, sR, cTop, cBot);
+
+      if (Math.random() > 0.5) {
+        // intact-ish grimy pane sitting in the frame
+        const pane = new THREE.Mesh(new THREE.PlaneGeometry(ww, wh), this._mats.glass);
+        pane.position.set(wx, wy, halfD + 0.02);
+        g.add(pane);
+      } else {
+        // broken window: a few jagged glass shard slivers clinging to the frame
+        const nSh = 3 + (Math.random() * 3 | 0);
+        for (let s = 0; s < nSh; s++) {
+          const edge = s % 4; // top/bottom/left/right of the opening
+          const sw = 0.12 + Math.random() * 0.18, sh = 0.18 + Math.random() * 0.4;
+          const shard = new THREE.Mesh(this._shardGeometry(sw, sh), this._mats.glass);
+          let sx = wx, sy = wy;
+          if (edge === 0) { sy = wy + wh / 2 - sh / 2; sx = wx + (Math.random() - 0.5) * ww; }
+          else if (edge === 1) { sy = wy - wh / 2 + sh / 2; sx = wx + (Math.random() - 0.5) * ww; }
+          else if (edge === 2) { sx = wx - ww / 2 + sw / 2; sy = wy + (Math.random() - 0.5) * wh; }
+          else { sx = wx + ww / 2 - sw / 2; sy = wy + (Math.random() - 0.5) * wh; }
+          shard.position.set(sx, sy, halfD + 0.015);
+          shard.rotation.z = (Math.random() - 0.5) * 0.9;
+          g.add(shard);
+        }
+      }
     };
     addWindow(-w * 0.3, hgt * 0.6);
     addWindow(w * 0.3, hgt * 0.6);
@@ -477,27 +682,42 @@ export class Level {
 
     // --- Palms: instanced trunk + instanced fronds ---
     const PALMS = 46;
-    const trunkGeo = new THREE.CylinderGeometry(0.22, 0.34, 6, 6, 1);
-    trunkGeo.translate(0, 3, 0);
+    const TRUNK_H = 6.2;
+    // Tapered trunk (wide base, narrow crown) with a gentle lean/curve baked in.
+    const trunkGeo = new THREE.CylinderGeometry(0.18, 0.40, TRUNK_H, 8, 8);
+    trunkGeo.translate(0, TRUNK_H / 2, 0);
+    {
+      const p = trunkGeo.attributes.position;
+      for (let i = 0; i < p.count; i++) {
+        const t = p.getY(i) / TRUNK_H;        // 0 base .. 1 crown
+        p.setX(i, p.getX(i) + Math.pow(t, 1.6) * 0.9); // sweep the trunk over
+      }
+      trunkGeo.computeVertexNormals();
+    }
     const trunkMesh = new THREE.InstancedMesh(trunkGeo, this._mats.palmTrunk, PALMS);
-    // A curved frond blade
-    const frondGeo = new THREE.PlaneGeometry(0.9, 3.4, 1, 4);
+    // A long, arched, drooping frond blade — base at origin, tip curling down.
+    const FROND_L = 3.8;
+    const frondGeo = new THREE.PlaneGeometry(0.9, FROND_L, 1, 8);
+    frondGeo.translate(0, FROND_L / 2, 0); // pivot at the base (attaches to crown)
     {
       const p = frondGeo.attributes.position;
       for (let i = 0; i < p.count; i++) {
-        const y = p.getY(i);
-        p.setZ(i, -Math.pow((y + 1.7) / 3.4, 2) * 1.1); // droop
-        p.setX(i, p.getX(i) * (1 - (y + 1.7) / 3.4 * 0.7)); // taper
+        const t = p.getY(i) / FROND_L;        // 0 base .. 1 tip
+        p.setZ(i, -Math.pow(t, 2) * 1.7);     // arch: tip droops forward/down
+        p.setX(i, p.getX(i) * (1.0 - t * 0.72)); // width taper toward the tip
       }
       frondGeo.computeVertexNormals();
     }
-    const FRONDS_PER = 7;
+    const FRONDS_PER = 14;
     const frondMesh = new THREE.InstancedMesh(frondGeo, this._mats.frond, PALMS * FRONDS_PER);
-    frondMesh.castShadow = true; trunkMesh.castShadow = true;
+    // Fronds don't cast shadow: alpha-cut quads would drop ugly solid rectangles.
+    frondMesh.castShadow = false; trunkMesh.castShadow = true;
     frondMesh.receiveShadow = true; trunkMesh.receiveShadow = true;
 
     const m = new THREE.Matrix4(), q = new THREE.Quaternion(),
       pos = new THREE.Vector3(), scl = new THREE.Vector3(), e = new THREE.Euler();
+    const qYaw = new THREE.Quaternion(), qTilt = new THREE.Quaternion();
+    const AX_Y = new THREE.Vector3(0, 1, 0), AX_X = new THREE.Vector3(1, 0, 0);
     let fi = 0;
     for (let i = 0; i < PALMS; i++) {
       const side = i % 2 === 0 ? -1 : 1;
@@ -511,14 +731,26 @@ export class Level {
       pos.set(x, y, z); scl.set(s, s, s);
       m.compose(pos, q, scl); trunkMesh.setMatrixAt(i, m);
 
-      // crown of fronds
-      const crownY = y + 6 * s;
+      // crown sits at the swept-over trunk top (curve pushed local +x by ~0.9)
+      const sweep = 0.9 * s;
+      const crownX = x + Math.cos(yaw) * sweep;
+      const crownZ = z - Math.sin(yaw) * sweep;
+      const crownY = y + TRUNK_H * s;
       for (let f = 0; f < FRONDS_PER; f++) {
-        const fyaw = yaw + (f / FRONDS_PER) * Math.PI * 2;
-        const pitch = -0.5 - rnd() * 0.4;
-        e.set(pitch, fyaw, 0); q.setFromEuler(e);
-        pos.set(x + Math.sin(fyaw) * 0.2, crownY, z + Math.cos(fyaw) * 0.2);
-        scl.set(s, s, s);
+        // Break radial-spoke symmetry with per-frond yaw jitter.
+        const fyaw = yaw + (f / FRONDS_PER) * Math.PI * 2 + (rnd() - 0.5) * 0.5;
+        // Vary elevation: ~half the fronds arch outward toward horizontal,
+        // the rest rise up. tilt = angle from vertical (0 = straight up).
+        const tier = f % 3;
+        const tilt = tier === 0 ? 0.35 + rnd() * 0.3          // upright inner crown
+          : tier === 1 ? 0.85 + rnd() * 0.35                   // mid spread
+            : 1.25 + rnd() * 0.4;                              // outer, near-horizontal droop
+        qYaw.setFromAxisAngle(AX_Y, fyaw);
+        qTilt.setFromAxisAngle(AX_X, tilt);
+        q.copy(qYaw).multiply(qTilt);
+        const fs = s * (0.9 + rnd() * 0.25);
+        pos.set(crownX, crownY - 0.15 * s, crownZ);
+        scl.set(fs, fs, fs);
         m.compose(pos, q, scl); frondMesh.setMatrixAt(fi++, m);
       }
       // thin trunk collider so players cannot walk through palms
@@ -549,8 +781,7 @@ export class Level {
 
     // --- Dry grass tufts: instanced crossed quads (dense ground cover) ---
     const GRASS = 520;
-    const bladeGeo = new THREE.PlaneGeometry(0.7, 0.6, 1, 1);
-    bladeGeo.translate(0, 0.3, 0);
+    const bladeGeo = this._grassBladeGeometry(); // genuinely crossed, tapered, gradient
     const grassMesh = new THREE.InstancedMesh(bladeGeo, this._mats.grass, GRASS);
     grassMesh.receiveShadow = true;
     for (let i = 0; i < GRASS; i++) {
@@ -558,8 +789,11 @@ export class Level {
       const x = (rnd() - 0.5) * 64;
       const y = env.getHeight(x, z);
       const s = 0.7 + rnd() * 0.9;
-      e.set(0, rnd() * Math.PI, 0); q.setFromEuler(e);
-      pos.set(x, y, z); scl.set(s, s * (0.8 + rnd() * 0.6), s);
+      // per-instance yaw + a little tilt/lean so the clump isn't a rigid grid
+      e.set((rnd() - 0.5) * 0.35, rnd() * Math.PI * 2, (rnd() - 0.5) * 0.35);
+      q.setFromEuler(e);
+      pos.set(x, y, z);
+      scl.set(s * (0.8 + rnd() * 0.5), s * (0.8 + rnd() * 0.7), s * (0.8 + rnd() * 0.5));
       m.compose(pos, q, scl); grassMesh.setMatrixAt(i, m);
     }
     grassMesh.instanceMatrix.needsUpdate = true;

@@ -156,16 +156,22 @@ export class WeaponSystem {
     const g = new THREE.Group();
 
     // PBR materials -------------------------------------------------------
+    // Emissive "floor": a tiny self-lit warm term so no surface ever crushes to
+    // pure black when the world sun is backlighting the camera. Kept far below
+    // 1.0 so lit surfaces still read as lit, not glowing.
     const metal = new THREE.MeshStandardMaterial({
-      color: 0x2a2c33, map: T.metalTex, roughnessMap: T.metalRough,
-      roughness: 0.55, metalness: 0.9,
+      color: 0x33353d, map: T.metalTex, roughnessMap: T.metalRough,
+      roughness: 0.52, metalness: 0.9,
+      emissive: 0x0b0c10, emissiveIntensity: 1.0,
     });
     const blackMetal = new THREE.MeshStandardMaterial({
-      color: 0x14151a, roughness: 0.6, metalness: 0.85,
+      color: 0x1b1c22, roughness: 0.58, metalness: 0.85,
+      emissive: 0x090a0d, emissiveIntensity: 1.0,
     });
     const wood = new THREE.MeshStandardMaterial({
-      color: 0x6b4423, map: T.woodTex, roughnessMap: T.woodRough,
-      roughness: 0.72, metalness: 0.02,
+      color: 0x7a4e28, map: T.woodTex, roughnessMap: T.woodRough,
+      roughness: 0.7, metalness: 0.02,
+      emissive: 0x0d0906, emissiveIntensity: 1.0,
     });
 
     // Root pivot so recoil rotates around the shoulder/wrist convincingly.
@@ -195,14 +201,22 @@ export class WeaponSystem {
     // --- Wood handguard (fore-end) with slight taper ---
     add(new THREE.BoxGeometry(0.05, 0.052, 0.24), wood, 0, -0.006, -0.52);
     add(new THREE.BoxGeometry(0.056, 0.03, 0.22), wood, 0, -0.028, -0.52);
+    // metal trunnion ring that visually breaks handguard from receiver, and a
+    // stepped gas block up front — clear diameter changes down the barrel line.
+    add(new THREE.CylinderGeometry(0.033, 0.033, 0.03, 12), metal, 0, 0.006, -0.40, Math.PI / 2);
+    add(new THREE.BoxGeometry(0.03, 0.05, 0.045), metal, 0, 0.03, -0.66);
 
     // --- Wood buttstock ---
     add(new THREE.BoxGeometry(0.056, 0.10, 0.26), wood, 0, -0.014, 0.02, -0.06);
     // butt pad
     add(new THREE.BoxGeometry(0.05, 0.12, 0.02), blackMetal, 0, -0.02, 0.15, -0.06);
 
-    // --- Pistol grip (wood) ---
-    add(new THREE.BoxGeometry(0.042, 0.13, 0.05), wood, 0, -0.10, -0.14, 0.32);
+    // --- Pistol grip (wood) — fuller, with a flared cap so it reads as a grip ---
+    add(new THREE.BoxGeometry(0.05, 0.14, 0.058), wood, 0, -0.105, -0.14, 0.34);
+    add(new THREE.BoxGeometry(0.056, 0.02, 0.066), blackMetal, 0.004, -0.175, -0.115, 0.34); // grip cap
+    // --- Trigger guard loop + trigger: a strong, unmistakable "gun" cue ---
+    add(new THREE.TorusGeometry(0.026, 0.006, 8, 16), blackMetal, 0, -0.06, -0.20, 0, Math.PI / 2, 0);
+    add(new THREE.BoxGeometry(0.008, 0.026, 0.006), blackMetal, 0, -0.052, -0.20); // trigger blade
 
     // --- Magazine (curved-ish, angled) as its own group so it can drop out ---
     const magGroup = new THREE.Group();
@@ -229,13 +243,16 @@ export class WeaponSystem {
     this.chargeGroup = chargeGroup;
     this._chargeRest = chargeGroup.position.z;
 
-    // --- Iron sights: rear aperture + front post ---
+    // --- Iron sights: rear aperture + front post (raised so they break the
+    // top silhouette and read as a sight line, not a flat rib) ---
     // Rear sight (aperture on a raised block)
-    add(new THREE.BoxGeometry(0.03, 0.022, 0.02), blackMetal, 0, 0.055, -0.16);
-    const rearRing = add(new THREE.TorusGeometry(0.007, 0.0025, 8, 12), blackMetal, 0, 0.062, -0.16);
-    // Front sight post + protective ears
-    add(new THREE.BoxGeometry(0.004, 0.03, 0.006), blackMetal, 0, 0.058, -0.78);
-    add(new THREE.BoxGeometry(0.026, 0.03, 0.006), blackMetal, 0, 0.052, -0.78);
+    add(new THREE.BoxGeometry(0.03, 0.032, 0.024), blackMetal, 0, 0.062, -0.16);
+    const rearRing = add(new THREE.TorusGeometry(0.008, 0.0026, 8, 12), blackMetal, 0, 0.076, -0.16);
+    // Front sight tower: post on a base flanked by protective ears
+    add(new THREE.BoxGeometry(0.03, 0.026, 0.03), blackMetal, 0, 0.052, -0.78);   // base
+    add(new THREE.BoxGeometry(0.005, 0.036, 0.006), blackMetal, 0, 0.076, -0.78); // post
+    add(new THREE.BoxGeometry(0.006, 0.034, 0.006), blackMetal, -0.013, 0.075, -0.78); // left ear
+    add(new THREE.BoxGeometry(0.006, 0.034, 0.006), blackMetal, 0.013, 0.075, -0.78);  // right ear
     this.sightRef = rearRing; // used to align ADS to screen centre
 
     // --- Sling swivel nubs ---
@@ -274,11 +291,34 @@ export class WeaponSystem {
     this.flash2.visible = false;
     rig.add(this.flash2);
 
+    // --- Dedicated viewmodel lighting rig -----------------------------------
+    // The world key light (sun) is a backlight in golden hour, so the
+    // camera-facing side of the gun receives almost nothing and crushes to a
+    // black silhouette. Parent a warm, range-limited fill light to the camera
+    // so the weapon is lit from the viewer's side regardless of sun direction.
+    // The tight `distance` (falls to zero well before world cover) keeps this a
+    // viewmodel light in practice — the gun sits 0.3-0.9m away and takes almost
+    // all of it, while the savanna beyond 2.4m receives nothing.
+    const keyFill = new THREE.PointLight(0xffe6c0, 1.35, 2.4, 2.0);
+    keyFill.position.set(-0.28, 0.34, -0.35); // up and left of the muzzle line
+    this.ctx.camera.add(keyFill);
+    this.viewFill = keyFill;
+    // A dim, cooler bounce from the lower right lifts the shadow side so the
+    // receiver/wood read as rounded forms rather than a flat wedge.
+    const rimFill = new THREE.PointLight(0xbfd0e0, 0.4, 2.0, 2.0);
+    rimFill.position.set(0.34, -0.22, -0.25);
+    this.ctx.camera.add(rimFill);
+    this.viewRim = rimFill;
+
     this.viewModel = g;
-    this.restPos = new THREE.Vector3(0.16, -0.16, -0.4);
-    this.adsPos = new THREE.Vector3(0, -0.098, -0.30); // refined below via sight
-    this.restRot = new THREE.Vector3(0, 0, 0);
+    this.restPos = new THREE.Vector3(0.16, -0.155, -0.4);
+    this.adsPos = new THREE.Vector3(0, -0.112, -0.30); // aperture aligned to centre
+    // Resting low-ready cant: muzzle dipped, canted inboard so the receiver's
+    // side profile, magazine and grip read as a rifle rather than an end-on
+    // slab. Blended out toward zero as the player aims (see _animate).
+    this.restRot = new THREE.Vector3(-0.07, 0.11, 0.06);
     g.position.copy(this.restPos);
+    g.rotation.set(this.restRot.x, this.restRot.y, this.restRot.z);
     this.ctx.camera.add(g);
   }
 
@@ -358,7 +398,7 @@ export class WeaponSystem {
     // ADS blend (block full ADS during reload)
     const wantAds = input.mouse.right && this.reloading <= 0;
     this.ads += ((wantAds ? 1 : 0) - this.ads) * Math.min(1, dt * 14);
-    this.ctx.camera.fov += ((wantAds ? 60 : 75) - this.ctx.camera.fov) * cdt;
+    this.ctx.camera.fov += ((wantAds ? 58 : 72) - this.ctx.camera.fov) * cdt;
     this.ctx.camera.updateProjectionMatrix();
 
     // reload timer
@@ -491,9 +531,12 @@ export class WeaponSystem {
     g.position.lerp(target, Math.min(1, dt * 20));
 
     // --- Compose rotation on the outer group ---
-    const rx = this._swayRot.x + this._recoilRot.x + reloadRotX;
-    const ry = this._swayRot.y + this._recoilRot.y;
-    const rz = this._swayRot.z + this._recoilRot.z + bobRoll + reloadRotZ;
+    // Base low-ready cant at the hip, straightened as the player aims so the
+    // iron sights settle onto screen centre.
+    const cant = 1 - this.ads;
+    const rx = this.restRot.x * cant + this._swayRot.x + this._recoilRot.x + reloadRotX;
+    const ry = this.restRot.y * cant + this._swayRot.y + this._recoilRot.y;
+    const rz = this.restRot.z * cant + this._swayRot.z + this._recoilRot.z + bobRoll + reloadRotZ;
     g.rotation.x += (rx - g.rotation.x) * Math.min(1, dt * 22);
     g.rotation.y += (ry - g.rotation.y) * Math.min(1, dt * 22);
     g.rotation.z += (rz - g.rotation.z) * Math.min(1, dt * 22);
