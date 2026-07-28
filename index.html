@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kwanza — Angola 1975</title>
+  <style>
+    :root { --accent: #c9a45c; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a0a; font-family: 'Courier New', monospace; }
+    #app { position: fixed; inset: 0; }
+    canvas { display: block; width: 100%; height: 100%; }
+
+    /* ---- HUD ---- */
+    #hud { position: fixed; inset: 0; pointer-events: none; z-index: 10; color: #e8e0d0; }
+    #hud.hidden { display: none; }
+
+    #crosshair { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 26px; height: 26px; }
+    #crosshair .line { position: absolute; background: rgba(230,220,200,0.85); box-shadow: 0 0 2px rgba(0,0,0,0.9); }
+    #crosshair .l-top    { left: 50%; top: 0;   width: 2px; height: 8px; transform: translateX(-50%); }
+    #crosshair .l-bottom { left: 50%; bottom: 0;width: 2px; height: 8px; transform: translateX(-50%); }
+    #crosshair .l-left   { top: 50%; left: 0;   height: 2px; width: 8px; transform: translateY(-50%); }
+    #crosshair .l-right  { top: 50%; right: 0;  height: 2px; width: 8px; transform: translateY(-50%); }
+
+    #hit-marker { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%) rotate(45deg); width: 22px; height: 22px; opacity: 0; }
+    #hit-marker .hm { position: absolute; background: #fff; }
+    #hit-marker .hm-v { left: 50%; top: 0; width: 2px; height: 100%; transform: translateX(-50%); }
+    #hit-marker .hm-h { top: 50%; left: 0; height: 2px; width: 100%; transform: translateY(-50%); }
+
+    #bottom-left { position: absolute; left: 34px; bottom: 30px; }
+    #health-wrap { width: 220px; }
+    #health-label { font-size: 11px; letter-spacing: 3px; opacity: 0.7; margin-bottom: 4px; }
+    #health-bar { width: 100%; height: 10px; background: rgba(0,0,0,0.5); border: 1px solid rgba(230,220,200,0.3); }
+    #health-fill { height: 100%; width: 100%; background: linear-gradient(90deg,#8a2b22,#c94a3a); transition: width 0.2s; }
+
+    #bottom-right { position: absolute; right: 40px; bottom: 28px; text-align: right; }
+    #ammo { font-size: 46px; font-weight: bold; letter-spacing: 2px; text-shadow: 0 2px 6px rgba(0,0,0,0.8); }
+    #ammo .reserve { font-size: 22px; opacity: 0.6; }
+    #weapon-name { font-size: 13px; letter-spacing: 4px; opacity: 0.65; margin-top: 2px; }
+
+    #objective { position: absolute; left: 34px; top: 26px; font-size: 13px; letter-spacing: 1px; max-width: 340px; }
+    #objective .tag { color: var(--accent); letter-spacing: 3px; font-size: 11px; }
+    #compass { position: absolute; left: 50%; top: 20px; transform: translateX(-50%); font-size: 13px; letter-spacing: 6px; opacity: 0.7; }
+
+    #damage-vignette { position: absolute; inset: 0; box-shadow: inset 0 0 200px 40px rgba(140,20,10,0); transition: box-shadow 0.12s; pointer-events: none; }
+
+    /* ---- Overlays ---- */
+    .overlay { position: fixed; inset: 0; z-index: 30; display: flex; flex-direction: column; align-items: center; justify-content: center;
+               background: radial-gradient(circle at 50% 40%, rgba(30,26,18,0.85), rgba(6,6,6,0.97)); color: #e8e0d0; text-align: center; }
+    .overlay.hidden { display: none; }
+    .title { font-size: 54px; letter-spacing: 10px; color: var(--accent); text-shadow: 0 4px 20px rgba(0,0,0,0.9); }
+    .subtitle { font-size: 15px; letter-spacing: 4px; opacity: 0.7; margin-top: 10px; }
+    .era { font-size: 12px; letter-spacing: 3px; opacity: 0.5; margin-top: 26px; max-width: 520px; line-height: 1.7; }
+    .prompt { margin-top: 40px; font-size: 16px; letter-spacing: 3px; padding: 14px 34px; border: 1px solid var(--accent);
+              pointer-events: auto; cursor: pointer; background: rgba(201,164,92,0.08); transition: background 0.2s; }
+    .prompt:hover { background: rgba(201,164,92,0.2); }
+    .controls-hint { margin-top: 30px; font-size: 12px; letter-spacing: 2px; opacity: 0.5; line-height: 2; }
+
+    #loading-bar-wrap { width: 300px; height: 4px; background: rgba(255,255,255,0.1); margin-top: 30px; }
+    #loading-bar { height: 100%; width: 0%; background: var(--accent); transition: width 0.3s; }
+
+    #fps-counter { position: absolute; right: 12px; top: 8px; font-size: 11px; opacity: 0.35; z-index: 20; color: #fff; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+
+  <!-- HUD -->
+  <div id="hud" class="hidden">
+    <div id="crosshair">
+      <div class="line l-top"></div><div class="line l-bottom"></div>
+      <div class="line l-left"></div><div class="line l-right"></div>
+    </div>
+    <div id="hit-marker"><div class="hm hm-v"></div><div class="hm hm-h"></div></div>
+    <div id="compass">N</div>
+    <div id="objective"><div class="tag">OBJECTIVE</div><div id="objective-text">Advance through the plantation.</div></div>
+    <div id="bottom-left">
+      <div id="health-wrap">
+        <div id="health-label">VITALS</div>
+        <div id="health-bar"><div id="health-fill"></div></div>
+      </div>
+    </div>
+    <div id="bottom-right">
+      <div id="ammo"><span id="ammo-mag">30</span><span class="reserve"> / <span id="ammo-reserve">120</span></span></div>
+      <div id="weapon-name">FAL 7.62</div>
+    </div>
+    <div id="damage-vignette"></div>
+  </div>
+
+  <div id="fps-counter">0 fps</div>
+
+  <!-- Start overlay -->
+  <div id="start-overlay" class="overlay">
+    <div class="title">KWANZA</div>
+    <div class="subtitle">ANGOLA — 1975</div>
+    <div class="era">
+      A dramatization set during the Angolan Civil War. This is a work of fiction intended
+      to portray the period with gravity, not to glorify the conflict or any faction within it.
+    </div>
+    <div id="loading-bar-wrap"><div id="loading-bar"></div></div>
+    <div id="start-btn" class="prompt" style="display:none">CLICK TO DEPLOY</div>
+    <div class="controls-hint">
+      WASD move &nbsp;·&nbsp; MOUSE look &nbsp;·&nbsp; LEFT-CLICK fire &nbsp;·&nbsp; RIGHT-CLICK aim<br/>
+      SHIFT sprint &nbsp;·&nbsp; CTRL crouch &nbsp;·&nbsp; SPACE jump &nbsp;·&nbsp; R reload &nbsp;·&nbsp; ESC pause
+    </div>
+  </div>
+
+  <!-- Pause / death overlay -->
+  <div id="pause-overlay" class="overlay hidden">
+    <div class="title" id="pause-title">PAUSED</div>
+    <div id="resume-btn" class="prompt">RESUME</div>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./vendor/three/build/three.module.js",
+      "three/addons/": "./vendor/three/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
