@@ -47,11 +47,17 @@ try {
   await page.waitForTimeout(1500);
 } catch {}
 
-await page.screenshot({ path: OUT });
+let shotOk = true;
+try {
+  await page.screenshot({ path: OUT, timeout: 90000, animations: 'disabled' });
+} catch (e) {
+  shotOk = false;
+  console.log('SCREENSHOT_FAILED:', String(e.message).split('\n')[0]);
+}
 await browser.close();
 await new Promise((r) => server.close(r));
 
-console.log('SCREENSHOT:', OUT);
+if (shotOk) console.log('SCREENSHOT:', OUT);
 console.log('ERRORS:', errors.length);
-errors.slice(0, 20).forEach((e) => console.log('  -', e.slice(0, 300)));
-process.exit(errors.length ? 1 : 0);
+errors.slice(0, 25).forEach((e) => console.log('  -', e.slice(0, 400)));
+process.exit(errors.length || !shotOk ? 1 : 0);

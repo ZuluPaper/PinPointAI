@@ -5,109 +5,274 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Kwanza — Angola 1975</title>
   <style>
-    :root { --accent: #c9a45c; }
+    :root {
+      --accent: #c9a45c;          /* brass / golden-hour */
+      --accent-dim: #8a7238;
+      --ink: #e8e0d0;             /* bone white text */
+      --ink-dim: rgba(232,224,208,0.62);
+      --ink-faint: rgba(232,224,208,0.34);
+      --danger: #d9432f;
+      --danger-deep: #7c1d13;
+      --ok: #7fae5e;
+      --panel: rgba(10,10,8,0.42);
+      --stroke: rgba(232,224,208,0.22);
+    }
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a0a; font-family: 'Courier New', monospace; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a0a; font-family: 'Courier New', ui-monospace, monospace; -webkit-font-smoothing: antialiased; }
     #app { position: fixed; inset: 0; }
     canvas { display: block; width: 100%; height: 100%; }
 
-    /* ---- HUD ---- */
-    #hud { position: fixed; inset: 0; pointer-events: none; z-index: 10; color: #e8e0d0; }
+    /* ============================ HUD ============================ */
+    #hud { position: fixed; inset: 0; pointer-events: none; z-index: 10; color: var(--ink);
+           opacity: 0; transition: opacity 0.5s ease; }
+    #hud:not(.hidden) { opacity: 1; }
     #hud.hidden { display: none; }
 
-    #crosshair { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 26px; height: 26px; }
-    #crosshair .line { position: absolute; background: rgba(230,220,200,0.85); box-shadow: 0 0 2px rgba(0,0,0,0.9); }
-    #crosshair .l-top    { left: 50%; top: 0;   width: 2px; height: 8px; transform: translateX(-50%); }
-    #crosshair .l-bottom { left: 50%; bottom: 0;width: 2px; height: 8px; transform: translateX(-50%); }
-    #crosshair .l-left   { top: 50%; left: 0;   height: 2px; width: 8px; transform: translateY(-50%); }
-    #crosshair .l-right  { top: 50%; right: 0;  height: 2px; width: 8px; transform: translateY(-50%); }
+    /* ---- always-on screen treatment: vignette, grain, subtle scanlines ---- */
+    #screen-fx { position: absolute; inset: 0; pointer-events: none; z-index: 1; }
+    #screen-fx::before { /* corner vignette */
+      content: ''; position: absolute; inset: 0;
+      background: radial-gradient(ellipse 120% 120% at 50% 46%, transparent 52%, rgba(0,0,0,0.28) 82%, rgba(0,0,0,0.62) 100%);
+      mix-blend-mode: multiply;
+    }
+    #screen-fx::after { /* faint horizontal scanline weave — very subtle, period film feel */
+      content: ''; position: absolute; inset: 0; opacity: 0.05;
+      background: repeating-linear-gradient(0deg, rgba(0,0,0,0.9) 0px, rgba(0,0,0,0.9) 1px, transparent 1px, transparent 3px);
+    }
+    /* warm golden-hour edge tint */
+    #edge-tint { position: absolute; inset: 0; pointer-events: none; z-index: 1;
+      background: radial-gradient(ellipse 140% 100% at 50% 120%, rgba(201,164,92,0.10), transparent 55%);
+      mix-blend-mode: screen; }
 
-    #hit-marker { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%) rotate(45deg); width: 22px; height: 22px; opacity: 0; }
-    #hit-marker .hm { position: absolute; background: #fff; }
+    /* ---- crosshair ---- */
+    #crosshair { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+                 width: 44px; height: 44px; z-index: 3; will-change: transform; }
+    #crosshair .line { position: absolute; background: rgba(236,228,210,0.92);
+                       box-shadow: 0 0 2px rgba(0,0,0,0.95); border-radius: 1px; }
+    /* spread is driven by --sp (px) on #crosshair */
+    #crosshair .l-top    { left: 50%; top: calc(50% - var(--sp,7px) - 9px);  width: 2px; height: 8px; transform: translateX(-50%); }
+    #crosshair .l-bottom { left: 50%; top: calc(50% + var(--sp,7px) + 1px);  width: 2px; height: 8px; transform: translateX(-50%); }
+    #crosshair .l-left   { top: 50%; left: calc(50% - var(--sp,7px) - 9px);  height: 2px; width: 8px; transform: translateY(-50%); }
+    #crosshair .l-right  { top: 50%; left: calc(50% + var(--sp,7px) + 1px);  height: 2px; width: 8px; transform: translateY(-50%); }
+    #crosshair .dot { position: absolute; left: 50%; top: 50%; width: 2px; height: 2px; border-radius: 50%;
+                      transform: translate(-50%,-50%); background: rgba(236,228,210,0.95); box-shadow: 0 0 2px rgba(0,0,0,0.95); }
+
+    /* ---- hit marker ---- */
+    #hit-marker { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%) rotate(45deg);
+                  width: 26px; height: 26px; opacity: 0; z-index: 4; }
+    #hit-marker .hm { position: absolute; background: #fff; box-shadow: 0 0 3px rgba(0,0,0,0.85); }
     #hit-marker .hm-v { left: 50%; top: 0; width: 2px; height: 100%; transform: translateX(-50%); }
     #hit-marker .hm-h { top: 50%; left: 0; height: 2px; width: 100%; transform: translateY(-50%); }
+    #hit-marker.kill { animation: hmpop 0.22s ease-out; }
+    @keyframes hmpop { 0% { transform: translate(-50%,-50%) rotate(45deg) scale(1.5); } 100% { transform: translate(-50%,-50%) rotate(45deg) scale(1); } }
 
-    #bottom-left { position: absolute; left: 34px; bottom: 30px; }
-    #health-wrap { width: 220px; }
-    #health-label { font-size: 11px; letter-spacing: 3px; opacity: 0.7; margin-bottom: 4px; }
-    #health-bar { width: 100%; height: 10px; background: rgba(0,0,0,0.5); border: 1px solid rgba(230,220,200,0.3); }
-    #health-fill { height: 100%; width: 100%; background: linear-gradient(90deg,#8a2b22,#c94a3a); transition: width 0.2s; }
+    /* ---- compass tape ---- */
+    #compass { position: absolute; left: 50%; top: 16px; transform: translateX(-50%);
+               width: 300px; height: 30px; overflow: hidden; z-index: 3;
+               -webkit-mask-image: linear-gradient(90deg, transparent, #000 18%, #000 82%, transparent);
+               mask-image: linear-gradient(90deg, transparent, #000 18%, #000 82%, transparent); }
+    #compass-tape { position: absolute; top: 0; left: 0; height: 100%; will-change: transform; }
+    #compass .mk { position: absolute; top: 0; transform: translateX(-50%); text-align: center; }
+    #compass .mk .tick { width: 1px; margin: 0 auto; background: var(--ink-faint); }
+    #compass .mk.card .tick { width: 2px; background: var(--ink); }
+    #compass .mk .lbl { font-size: 12px; letter-spacing: 2px; color: var(--ink-dim); margin-top: 2px; }
+    #compass .mk.card .lbl { color: var(--ink); }
+    #compass .mk.card.NESW .lbl { color: var(--accent); font-weight: bold; }
+    #compass-needle { position: absolute; left: 50%; top: 0; transform: translateX(-50%);
+                      width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent;
+                      border-top: 6px solid var(--accent); z-index: 4; }
+    #compass-heading { position: absolute; left: 50%; top: 27px; transform: translateX(-50%);
+                       font-size: 10px; letter-spacing: 2px; color: var(--accent); opacity: 0.85; }
 
-    #bottom-right { position: absolute; right: 40px; bottom: 28px; text-align: right; }
-    #ammo { font-size: 46px; font-weight: bold; letter-spacing: 2px; text-shadow: 0 2px 6px rgba(0,0,0,0.8); }
-    #ammo .reserve { font-size: 22px; opacity: 0.6; }
-    #weapon-name { font-size: 13px; letter-spacing: 4px; opacity: 0.65; margin-top: 2px; }
+    /* ---- objective banner ---- */
+    #objective { position: absolute; left: 30px; top: 24px; max-width: 330px; z-index: 3;
+                 padding-left: 12px; border-left: 2px solid var(--accent); }
+    #objective .tag { color: var(--accent); letter-spacing: 4px; font-size: 10px; margin-bottom: 3px; }
+    #objective-text { font-size: 13px; letter-spacing: 1px; line-height: 1.4; color: var(--ink); text-shadow: 0 1px 3px rgba(0,0,0,0.9); }
+    #objective.flash { animation: objflash 0.6s ease-out; }
+    @keyframes objflash { 0% { opacity: 0; transform: translateX(-8px); } 100% { opacity: 1; transform: translateX(0); } }
 
-    #objective { position: absolute; left: 34px; top: 26px; font-size: 13px; letter-spacing: 1px; max-width: 340px; }
-    #objective .tag { color: var(--accent); letter-spacing: 3px; font-size: 11px; }
-    #compass { position: absolute; left: 50%; top: 20px; transform: translateX(-50%); font-size: 13px; letter-spacing: 6px; opacity: 0.7; }
+    /* ---- kill feed ---- */
+    #kill-feed { position: absolute; right: 30px; top: 60px; z-index: 3; display: flex; flex-direction: column;
+                 align-items: flex-end; gap: 5px; }
+    #kill-feed .kf { font-size: 11px; letter-spacing: 2px; color: var(--ink-dim); background: var(--panel);
+                     border-right: 2px solid var(--danger); padding: 3px 9px; text-shadow: 0 1px 2px rgba(0,0,0,0.9);
+                     animation: kfin 0.25s ease-out; white-space: nowrap; }
+    #kill-feed .kf .x { color: var(--danger); margin: 0 5px; }
+    #kill-feed .kf.fade { opacity: 0; transition: opacity 0.5s ease; }
+    @keyframes kfin { 0% { opacity: 0; transform: translateX(14px); } 100% { opacity: 1; transform: translateX(0); } }
 
-    #damage-vignette { position: absolute; inset: 0; box-shadow: inset 0 0 200px 40px rgba(140,20,10,0); transition: box-shadow 0.12s; pointer-events: none; }
+    /* ---- vitals (health + stamina), bottom-left ---- */
+    #bottom-left { position: absolute; left: 30px; bottom: 28px; z-index: 3; width: 230px; }
+    #vitals .row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+    #vitals .cap { font-size: 9px; letter-spacing: 3px; color: var(--ink-faint); width: 20px; }
+    #health-bar, #stamina-bar { position: relative; height: 9px; flex: 1;
+      background: rgba(0,0,0,0.55); border: 1px solid var(--stroke);
+      /* notched military read-out */
+      background-image: repeating-linear-gradient(90deg, transparent 0, transparent 9px, rgba(0,0,0,0.6) 9px, rgba(0,0,0,0.6) 10px); }
+    #health-fill { height: 100%; width: 100%; background: linear-gradient(90deg, var(--danger-deep), var(--danger));
+      box-shadow: 0 0 8px rgba(217,67,47,0.35); transition: width 0.22s ease, background 0.3s ease; }
+    #health-fill.low { animation: hpulse 0.9s ease-in-out infinite; }
+    @keyframes hpulse { 0%,100% { filter: brightness(1); } 50% { filter: brightness(1.7); } }
+    #stamina-bar { height: 5px; }
+    #stamina-fill { height: 100%; width: 100%; background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+      transition: width 0.12s linear; }
+    #health-num { font-size: 11px; letter-spacing: 1px; color: var(--ink-dim); width: 34px; text-align: right; }
 
-    /* ---- Overlays ---- */
-    .overlay { position: fixed; inset: 0; z-index: 30; display: flex; flex-direction: column; align-items: center; justify-content: center;
-               background: radial-gradient(circle at 50% 40%, rgba(30,26,18,0.85), rgba(6,6,6,0.97)); color: #e8e0d0; text-align: center; }
+    /* ---- ammo + weapon, bottom-right ---- */
+    #bottom-right { position: absolute; right: 34px; bottom: 24px; text-align: right; z-index: 3; }
+    #ammo { font-size: 46px; font-weight: bold; letter-spacing: 1px; line-height: 1;
+            text-shadow: 0 2px 8px rgba(0,0,0,0.85); color: var(--ink); }
+    #ammo .reserve { font-size: 20px; opacity: 0.55; font-weight: normal; }
+    #ammo.low #ammo-mag { color: var(--danger); animation: ammopulse 0.7s ease-in-out infinite; }
+    #ammo.empty #ammo-mag { color: var(--danger); }
+    @keyframes ammopulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+    #weapon-name { font-size: 12px; letter-spacing: 4px; color: var(--ink-dim); margin-top: 4px; }
+    #reload-wrap { height: 3px; width: 150px; margin: 6px 0 0 auto; background: rgba(0,0,0,0.5);
+                   border: 1px solid var(--stroke); opacity: 0; transition: opacity 0.15s; }
+    #reload-wrap.on { opacity: 1; }
+    #reload-bar { height: 100%; width: 0%; background: var(--accent); }
+    #reload-label { font-size: 9px; letter-spacing: 3px; color: var(--accent); opacity: 0; margin-top: 3px; }
+    #reload-label.on { opacity: 0.85; }
+
+    /* ---- damage direction indicators ---- */
+    #dmg-indicators { position: absolute; left: 50%; top: 50%; width: 0; height: 0; z-index: 4; }
+    #dmg-indicators .di { position: absolute; left: 0; top: 0; width: 0; height: 0; opacity: 0;
+      transform-origin: 0 0; transition: opacity 0.15s linear; }
+    #dmg-indicators .di .arc {
+      position: absolute; left: -34px; top: -150px; width: 68px; height: 24px;
+      /* an upward-pointing danger arc, offset from centre */
+      border-top: 3px solid var(--danger);
+      border-radius: 60% 60% 0 0 / 100% 100% 0 0;
+      filter: drop-shadow(0 0 6px rgba(217,67,47,0.7)); }
+
+    /* ---- red damage / low-health vignette (opacity-driven, decayed in JS) ---- */
+    #damage-vignette { position: absolute; inset: 0; opacity: 0; pointer-events: none; z-index: 2;
+      box-shadow: inset 0 0 220px 60px rgba(150,22,12,0.9);
+      background: radial-gradient(ellipse 100% 100% at 50% 50%, transparent 55%, rgba(120,18,10,0.45) 100%); }
+
+    #fps-counter { position: absolute; right: 12px; bottom: 8px; font-size: 11px; opacity: 0.35; z-index: 20; color: #fff; letter-spacing: 1px; }
+
+    /* ============================ OVERLAYS ============================ */
+    .overlay { position: fixed; inset: 0; z-index: 30; display: flex; flex-direction: column;
+               align-items: center; justify-content: center; text-align: center; color: var(--ink);
+               background: radial-gradient(ellipse at 50% 38%, rgba(34,28,18,0.86), rgba(5,5,4,0.975)); }
+    .overlay::after { /* film grain over overlays */
+      content: ''; position: absolute; inset: 0; pointer-events: none; opacity: 0.05;
+      background: repeating-linear-gradient(0deg, rgba(0,0,0,0.9) 0px, rgba(0,0,0,0.9) 1px, transparent 1px, transparent 3px); }
     .overlay.hidden { display: none; }
-    .title { font-size: 54px; letter-spacing: 10px; color: var(--accent); text-shadow: 0 4px 20px rgba(0,0,0,0.9); }
-    .subtitle { font-size: 15px; letter-spacing: 4px; opacity: 0.7; margin-top: 10px; }
-    .era { font-size: 12px; letter-spacing: 3px; opacity: 0.5; margin-top: 26px; max-width: 520px; line-height: 1.7; }
-    .prompt { margin-top: 40px; font-size: 16px; letter-spacing: 3px; padding: 14px 34px; border: 1px solid var(--accent);
-              pointer-events: auto; cursor: pointer; background: rgba(201,164,92,0.08); transition: background 0.2s; }
-    .prompt:hover { background: rgba(201,164,92,0.2); }
-    .controls-hint { margin-top: 30px; font-size: 12px; letter-spacing: 2px; opacity: 0.5; line-height: 2; }
+    .overlay > * { position: relative; z-index: 1; }
 
-    #loading-bar-wrap { width: 300px; height: 4px; background: rgba(255,255,255,0.1); margin-top: 30px; }
-    #loading-bar { height: 100%; width: 0%; background: var(--accent); transition: width 0.3s; }
+    .title { font-size: 60px; letter-spacing: 14px; color: var(--accent); font-weight: bold;
+             text-shadow: 0 4px 24px rgba(0,0,0,0.9); margin-left: 14px; }
+    .title-rule { width: 220px; height: 1px; background: linear-gradient(90deg, transparent, var(--accent), transparent); margin: 16px 0 0; }
+    .subtitle { font-size: 14px; letter-spacing: 6px; color: var(--ink-dim); margin-top: 14px; }
+    .era { font-size: 12px; letter-spacing: 2px; color: var(--ink-faint); margin-top: 26px; max-width: 540px; line-height: 1.9; }
 
-    #fps-counter { position: absolute; right: 12px; top: 8px; font-size: 11px; opacity: 0.35; z-index: 20; color: #fff; }
+    .prompt { margin-top: 40px; font-size: 15px; letter-spacing: 4px; padding: 14px 40px;
+              border: 1px solid var(--accent); color: var(--ink); pointer-events: auto; cursor: pointer;
+              background: rgba(201,164,92,0.08); transition: background 0.2s, letter-spacing 0.2s; }
+    .prompt:hover { background: rgba(201,164,92,0.22); letter-spacing: 6px; }
+
+    .controls-hint { margin-top: 34px; font-size: 11px; letter-spacing: 2px; color: var(--ink-faint); line-height: 2.1; }
+    .controls-hint b { color: var(--accent); font-weight: normal; }
+
+    #loading-wrap { margin-top: 34px; display: flex; flex-direction: column; align-items: center; }
+    #loading-bar-wrap { width: 320px; height: 3px; background: rgba(255,255,255,0.08); overflow: hidden; }
+    #loading-bar { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+                   transition: width 0.3s ease; box-shadow: 0 0 8px rgba(201,164,92,0.5); }
+    #loading-text { font-size: 10px; letter-spacing: 4px; color: var(--ink-faint); margin-top: 12px; }
+
+    /* death overlay accent */
+    #pause-overlay.dead { background: radial-gradient(ellipse at 50% 40%, rgba(46,14,10,0.9), rgba(4,3,3,0.985)); }
+    #pause-overlay.dead .title { color: var(--danger); }
+    #pause-overlay.dead .title-rule { background: linear-gradient(90deg, transparent, var(--danger), transparent); }
+    #pause-sub { font-size: 12px; letter-spacing: 4px; color: var(--ink-faint); margin-top: 14px; }
   </style>
 </head>
 <body>
   <div id="app"></div>
 
-  <!-- HUD -->
+  <!-- ============================ HUD ============================ -->
   <div id="hud" class="hidden">
+    <div id="edge-tint"></div>
+
     <div id="crosshair">
       <div class="line l-top"></div><div class="line l-bottom"></div>
       <div class="line l-left"></div><div class="line l-right"></div>
+      <div class="dot"></div>
     </div>
+
     <div id="hit-marker"><div class="hm hm-v"></div><div class="hm hm-h"></div></div>
-    <div id="compass">N</div>
-    <div id="objective"><div class="tag">OBJECTIVE</div><div id="objective-text">Advance through the plantation.</div></div>
+
+    <!-- compass tape (marks injected by hud.js) -->
+    <div id="compass"><div id="compass-tape"></div></div>
+    <div id="compass-needle"></div>
+    <div id="compass-heading">000°</div>
+
+    <div id="objective">
+      <div class="tag">OBJECTIVE</div>
+      <div id="objective-text">Advance through the plantation.</div>
+    </div>
+
+    <div id="kill-feed"></div>
+
     <div id="bottom-left">
-      <div id="health-wrap">
-        <div id="health-label">VITALS</div>
-        <div id="health-bar"><div id="health-fill"></div></div>
+      <div id="vitals">
+        <div class="row">
+          <div class="cap">HP</div>
+          <div id="health-bar"><div id="health-fill"></div></div>
+          <div id="health-num">100</div>
+        </div>
+        <div class="row">
+          <div class="cap">STA</div>
+          <div id="stamina-bar"><div id="stamina-fill"></div></div>
+          <div style="width:34px"></div>
+        </div>
       </div>
     </div>
+
     <div id="bottom-right">
       <div id="ammo"><span id="ammo-mag">30</span><span class="reserve"> / <span id="ammo-reserve">120</span></span></div>
       <div id="weapon-name">FAL 7.62</div>
+      <div id="reload-wrap"><div id="reload-bar"></div></div>
+      <div id="reload-label" class="">RELOADING</div>
     </div>
+
+    <!-- damage direction arcs (pooled by hud.js) -->
+    <div id="dmg-indicators"></div>
+
     <div id="damage-vignette"></div>
+    <div id="screen-fx"></div>
   </div>
 
   <div id="fps-counter">0 fps</div>
 
-  <!-- Start overlay -->
+  <!-- ============================ START OVERLAY ============================ -->
   <div id="start-overlay" class="overlay">
     <div class="title">KWANZA</div>
+    <div class="title-rule"></div>
     <div class="subtitle">ANGOLA — 1975</div>
     <div class="era">
       A dramatization set during the Angolan Civil War. This is a work of fiction intended
-      to portray the period with gravity, not to glorify the conflict or any faction within it.
+      to portray the period with gravity — not to glorify the conflict, nor any faction within it.
     </div>
-    <div id="loading-bar-wrap"><div id="loading-bar"></div></div>
+    <div id="loading-wrap">
+      <div id="loading-bar-wrap"><div id="loading-bar"></div></div>
+      <div id="loading-text">PREPARING DEPLOYMENT…</div>
+    </div>
     <div id="start-btn" class="prompt" style="display:none">CLICK TO DEPLOY</div>
     <div class="controls-hint">
-      WASD move &nbsp;·&nbsp; MOUSE look &nbsp;·&nbsp; LEFT-CLICK fire &nbsp;·&nbsp; RIGHT-CLICK aim<br/>
-      SHIFT sprint &nbsp;·&nbsp; CTRL crouch &nbsp;·&nbsp; SPACE jump &nbsp;·&nbsp; R reload &nbsp;·&nbsp; ESC pause
+      <b>WASD</b> move &nbsp;·&nbsp; <b>MOUSE</b> look &nbsp;·&nbsp; <b>L-CLICK</b> fire &nbsp;·&nbsp; <b>R-CLICK</b> aim<br/>
+      <b>SHIFT</b> sprint &nbsp;·&nbsp; <b>CTRL</b> crouch &nbsp;·&nbsp; <b>SPACE</b> jump &nbsp;·&nbsp; <b>R</b> reload &nbsp;·&nbsp; <b>ESC</b> pause
     </div>
   </div>
 
-  <!-- Pause / death overlay -->
+  <!-- ============================ PAUSE / DEATH OVERLAY ============================ -->
   <div id="pause-overlay" class="overlay hidden">
     <div class="title" id="pause-title">PAUSED</div>
+    <div class="title-rule"></div>
+    <div id="pause-sub">Hold the line.</div>
     <div id="resume-btn" class="prompt">RESUME</div>
   </div>
 
