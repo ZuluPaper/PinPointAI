@@ -1,5 +1,8 @@
 node_modules/
 tools/shot*.png
+tools/pose*.png
+tools/elev*.png
+tools/wf_shot*.png
 tools/*.tmp
 .DS_Store
 *.log
